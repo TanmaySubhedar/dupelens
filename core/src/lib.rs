@@ -1,0 +1,286 @@
+//! DupeLens core engine: offline duplicate photo detection.
+//!
+//! Nothing here touches the network. Files are only opened for reading until the user
+//! explicitly asks [`Engine::delete`] to remove specific files.
+
+pub mod db;
+pub mod error;
+pub mod grouping;
+pub mod hashing;
+pub mod metadata;
+pub mod model;
+pub mod recommend;
+pub mod scanner;
+
+pub use error::{Error, Result};
+pub use grouping::GroupingConfig;
+pub use model::{DuplicateGroup, FileRecord, GroupKind, GroupMember};
+
+use rayon::prelude::*;
+use rusqlite::Connection;
+use serde::Serialize;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanPhase {
+    Discovering,
+    Analyzing,
+    Saving,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct ScanProgress {
+    pub phase: ScanPhase,
+    pub done: usize,
+    pub total: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ScanSummary {
+    pub files_found: usize,
+    /// Files that were new or changed and therefore re-analysed.
+    pub files_analyzed: usize,
+    /// Files whose cached analysis was reused because size and mtime were unchanged.
+    pub files_unchanged: usize,
+    /// Database entries removed because the file no longer exists in a selected folder.
+    pub files_removed: usize,
+    pub unreadable: Vec<PathBuf>,
+    pub missing_folders: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeleteMode {
+    /// Move to the Recycle Bin / Trash so the user can restore it.
+    Trash,
+    Permanent,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DeleteReport {
+    pub deleted: Vec<i64>,
+    pub failed: Vec<(i64, String)>,
+    pub bytes_freed: u64,
+}
+
+/// Whether [`DeleteMode::Trash`] works on this platform.
+pub const fn trash_supported() -> bool {
+    cfg!(any(
+        target_os = "windows",
+        target_os = "macos",
+        all(unix, not(any(target_os = "android", target_os = "ios")))
+    ))
+}
+
+pub struct Engine {
+    conn: Connection,
+    pub grouping: GroupingConfig,
+}
+
+impl Engine {
+    pub fn open(db_path: &Path) -> Result<Self> {
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
+        }
+        Ok(Self {
+            conn: db::open(db_path)?,
+            grouping: GroupingConfig::default(),
+        })
+    }
+
+    pub fn open_in_memory() -> Result<Self> {
+        Ok(Self {
+            conn: db::open_in_memory()?,
+            grouping: GroupingConfig::default(),
+        })
+    }
+
+    /// Remembers a folder for scanning. Returns the normalised absolute path that was stored.
+    pub fn add_folder(&self, folder: &Path) -> Result<PathBuf> {
+        let abs = std::path::absolute(folder).map_err(|e| Error::io(folder, e))?;
+        if !abs.is_dir() {
+            return Err(Error::InvalidFolder(abs));
+        }
+        if abs.to_str().is_none() {
+            return Err(Error::InvalidFolder(abs));
+        }
+        db::add_folder(&self.conn, &abs)?;
+        Ok(abs)
+    }
+
+    /// Forgets a folder. Its files drop out of results on the next scan.
+    pub fn remove_folder(&self, folder: &Path) -> Result<bool> {
+        let abs = std::path::absolute(folder).map_err(|e| Error::io(folder, e))?;
+        db::remove_folder(&self.conn, &abs)
+    }
+
+    pub fn folders(&self) -> Result<Vec<PathBuf>> {
+        db::folders(&self.conn)
+    }
+
+    /// Scans the selected folders (and only those). Unchanged files reuse cached results.
+    pub fn scan(&mut self, progress: &(dyn Fn(ScanProgress) + Sync)) -> Result<ScanSummary> {
+        let folders = self.folders()?;
+        if folders.is_empty() {
+            return Err(Error::NoFolders);
+        }
+        let mut summary = ScanSummary::default();
+        let (present, missing): (Vec<_>, Vec<_>) = folders.into_iter().partition(|f| f.is_dir());
+        summary.missing_folders = missing;
+
+        progress(ScanProgress {
+            phase: ScanPhase::Discovering,
+            done: 0,
+            total: 0,
+        });
+        let discovery = scanner::discover(&present);
+        summary.files_found = discovery.files.len();
+        summary.unreadable = discovery.skipped;
+
+        let known = db::fingerprints(&self.conn)?;
+        let (unchanged, changed): (Vec<_>, Vec<_>) = discovery.files.into_iter().partition(|f| {
+            known
+                .get(&f.path)
+                .is_some_and(|k| k.size == f.size && k.mtime_ns == f.mtime_ns)
+        });
+        summary.files_unchanged = unchanged.len();
+
+        let total = changed.len();
+        let done = AtomicUsize::new(0);
+        progress(ScanProgress {
+            phase: ScanPhase::Analyzing,
+            done: 0,
+            total,
+        });
+        let analysed: Vec<_> = changed
+            .into_par_iter()
+            .map(|f| {
+                let result = metadata::analyze(&f.path, f.size);
+                let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                progress(ScanProgress {
+                    phase: ScanPhase::Analyzing,
+                    done: n,
+                    total,
+                });
+                (f, result)
+            })
+            .collect();
+
+        progress(ScanProgress {
+            phase: ScanPhase::Saving,
+            done: 0,
+            total: 0,
+        });
+        let tx = self.conn.transaction()?;
+        let scan_id = db::next_scan_id(&tx)?;
+        for f in &unchanged {
+            db::mark_seen(&tx, known[&f.path].id, scan_id)?;
+        }
+        for (f, result) in analysed {
+            match result {
+                Ok(a) => {
+                    db::upsert(&tx, &f.path, f.size, f.mtime_ns, &a, scan_id)?;
+                    summary.files_analyzed += 1;
+                }
+                Err(_) => summary.unreadable.push(f.path),
+            }
+        }
+        summary.files_removed = db::prune_unseen(&tx, scan_id)?;
+        tx.commit()?;
+        Ok(summary)
+    }
+
+    /// Duplicate groups from the most recent scan, largest reclaimable space first.
+    pub fn groups(&self) -> Result<Vec<DuplicateGroup>> {
+        Ok(grouping::build_groups(
+            db::all_files(&self.conn)?,
+            &self.grouping,
+        ))
+    }
+
+    /// Deletes exactly the given files after the user has confirmed.
+    ///
+    /// Refuses the whole request (deleting nothing) if a file is unknown or if the request
+    /// would remove every copy in a duplicate group. Individual files are skipped (reported in
+    /// `failed`) if they changed on disk since the scan or lie outside the selected folders.
+    pub fn delete(&mut self, file_ids: &[i64], mode: DeleteMode) -> Result<DeleteReport> {
+        if mode == DeleteMode::Trash && !trash_supported() {
+            return Err(Error::DeletionRefused(
+                "moving to trash is not supported on this platform".into(),
+            ));
+        }
+        let requested: HashSet<i64> = file_ids.iter().copied().collect();
+
+        let mut files = Vec::with_capacity(requested.len());
+        for &id in &requested {
+            match db::file_by_id(&self.conn, id)? {
+                Some(f) => files.push(f),
+                None => {
+                    return Err(Error::DeletionRefused(format!(
+                        "unknown file id {id}; rescan first"
+                    )))
+                }
+            }
+        }
+
+        for g in self.groups()? {
+            if g.members.iter().all(|m| requested.contains(&m.file.id)) {
+                return Err(Error::DeletionRefused(format!(
+                    "this would delete every copy in group {} (keep at least one)",
+                    g.id
+                )));
+            }
+        }
+
+        let folders = self.folders()?;
+        let mut report = DeleteReport::default();
+        files.sort_by_key(|f| f.id);
+        for f in files {
+            match self.delete_one(&f, &folders, mode) {
+                Ok(()) => {
+                    db::delete_file_row(&self.conn, f.id)?;
+                    report.bytes_freed += f.size;
+                    report.deleted.push(f.id);
+                }
+                Err(why) => report.failed.push((f.id, why)),
+            }
+        }
+        Ok(report)
+    }
+
+    fn delete_one(
+        &self,
+        f: &FileRecord,
+        folders: &[PathBuf],
+        mode: DeleteMode,
+    ) -> std::result::Result<(), String> {
+        if !folders.iter().any(|root| f.path.starts_with(root)) {
+            return Err("outside the selected folders".into());
+        }
+        let meta =
+            std::fs::symlink_metadata(&f.path).map_err(|e| format!("cannot read file: {e}"))?;
+        if !meta.is_file() {
+            return Err("no longer a regular file".into());
+        }
+        if meta.len() != f.size || scanner::mtime_ns(&meta) != f.mtime_ns {
+            return Err("file changed since the last scan; rescan before deleting".into());
+        }
+        match mode {
+            DeleteMode::Permanent => std::fs::remove_file(&f.path).map_err(|e| e.to_string()),
+            DeleteMode::Trash => move_to_trash(&f.path),
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn move_to_trash(path: &Path) -> std::result::Result<(), String> {
+    trash::delete(path).map_err(|e| e.to_string())
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn move_to_trash(_path: &Path) -> std::result::Result<(), String> {
+    Err("trash is not supported on this platform".into())
+}

@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+
+[profile.dev.package."*"]
+# Image decoding is painfully slow unoptimised; optimise dependencies even in debug builds.
+opt-level = 2
+debug = false
+
+[profile.dev]
+# Keeps target/ small; full debug info for our own crate only when needed.
+debug = "line-tables-only"
