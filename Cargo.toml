@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["core"]
+# Built by Flutter (cargokit) as its own package once bindings are generated.
+exclude = ["app/rust"]
 
 [workspace.package]
 version = "0.1.0"

@@ -98,23 +98,31 @@ impl Engine {
         })
     }
 
-    /// Remembers a folder for scanning. Returns the normalised absolute path that was stored.
+    /// Remembers a folder for scanning. Returns the canonical path that was stored.
+    ///
+    /// Canonicalising matters for safety: if one folder were stored under two spellings
+    /// (`C:\Photos` and `c:\photos`, or via a junction), every photo would be scanned twice
+    /// and look like an exact duplicate of itself, and "deleting the copy" would delete the
+    /// only file.
     pub fn add_folder(&self, folder: &Path) -> Result<PathBuf> {
-        let abs = std::path::absolute(folder).map_err(|e| Error::io(folder, e))?;
-        if !abs.is_dir() {
-            return Err(Error::InvalidFolder(abs));
+        if !folder.is_dir() {
+            return Err(Error::InvalidFolder(folder.to_path_buf()));
         }
-        if abs.to_str().is_none() {
-            return Err(Error::InvalidFolder(abs));
+        let canonical = canonical_folder(folder).map_err(|e| Error::io(folder, e))?;
+        if canonical.to_str().is_none() {
+            return Err(Error::InvalidFolder(canonical));
         }
-        db::add_folder(&self.conn, &abs)?;
-        Ok(abs)
+        db::add_folder(&self.conn, &canonical)?;
+        Ok(canonical)
     }
 
     /// Forgets a folder. Its files drop out of results on the next scan.
     pub fn remove_folder(&self, folder: &Path) -> Result<bool> {
-        let abs = std::path::absolute(folder).map_err(|e| Error::io(folder, e))?;
-        db::remove_folder(&self.conn, &abs)
+        // The folder may no longer exist (e.g. an unplugged drive); fall back to its absolute path.
+        let path = canonical_folder(folder)
+            .or_else(|_| std::path::absolute(folder))
+            .map_err(|e| Error::io(folder, e))?;
+        db::remove_folder(&self.conn, &path)
     }
 
     pub fn folders(&self) -> Result<Vec<PathBuf>> {
@@ -273,6 +281,24 @@ impl Engine {
             DeleteMode::Trash => move_to_trash(&f.path),
         }
     }
+}
+
+/// The one true spelling of a folder: real letter case, links and `subst` drives resolved.
+/// On Windows, strips the `\\?\` prefix that `canonicalize` adds, so paths stay readable.
+fn canonical_folder(folder: &Path) -> std::io::Result<PathBuf> {
+    let canonical = std::fs::canonicalize(folder)?;
+    #[cfg(windows)]
+    {
+        if let Some(s) = canonical.to_str() {
+            if let Some(unc) = s.strip_prefix(r"\\?\UNC\") {
+                return Ok(PathBuf::from(format!(r"\\{unc}")));
+            }
+            if let Some(local) = s.strip_prefix(r"\\?\") {
+                return Ok(PathBuf::from(local));
+            }
+        }
+    }
+    Ok(canonical)
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]

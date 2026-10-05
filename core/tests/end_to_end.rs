@@ -254,3 +254,22 @@ fn persists_folders_and_results_across_restarts() {
     assert_eq!(engine.groups().unwrap().len(), 1);
     assert_eq!(engine.scan(&|_| {}).unwrap().files_unchanged, 4);
 }
+
+#[test]
+fn same_folder_under_different_spellings_is_stored_once() {
+    let lib = library();
+    let mut engine = Engine::open_in_memory().unwrap();
+    let photos = lib.root.join("photos");
+    engine.add_folder(&photos).unwrap();
+    engine.add_folder(&lib.root.join("photos/sub/..")).unwrap();
+    if cfg!(windows) {
+        let shouty = PathBuf::from(photos.to_str().unwrap().to_uppercase());
+        engine.add_folder(&shouty).unwrap();
+    }
+    assert_eq!(engine.folders().unwrap().len(), 1);
+
+    // Otherwise each photo would be scanned twice and look like a duplicate of itself.
+    engine.scan(&|_| {}).unwrap();
+    let g = &engine.groups().unwrap()[0];
+    assert_eq!(g.members.len(), 3);
+}

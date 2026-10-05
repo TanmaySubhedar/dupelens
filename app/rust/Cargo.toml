@@ -1,0 +1,15 @@
+[package]
+name = "dupelens_bridge"
+description = "flutter_rust_bridge layer exposing dupelens-core to the Flutter app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+anyhow = "1"
+dupelens-core = { path = "../../core" }
+# Must match the `flutter_rust_bridge` version in app/pubspec.yaml exactly.
+flutter_rust_bridge = "=2.13.0"
