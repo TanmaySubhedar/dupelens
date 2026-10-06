@@ -47,6 +47,15 @@ fn init(conn: Connection) -> Result<Connection> {
          CREATE TABLE IF NOT EXISTS meta (
              key   TEXT PRIMARY KEY,
              value INTEGER NOT NULL
+         );
+         -- Pixel-comparison scores between distinct contents (sha_a < sha_b), computed once.
+         -- `method` identifies the scoring algorithm, so changing it invalidates old scores.
+         CREATE TABLE IF NOT EXISTS local_differences (
+             sha_a  TEXT NOT NULL,
+             sha_b  TEXT NOT NULL,
+             method INTEGER NOT NULL,
+             score  REAL NOT NULL,
+             PRIMARY KEY (sha_a, sha_b, method)
          );",
     )?;
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -165,6 +174,57 @@ pub fn upsert(
 /// Forgets files not seen in the given scan (deleted, moved, or in a folder no longer selected).
 pub fn prune_unseen(conn: &Connection, scan_id: i64) -> Result<usize> {
     Ok(conn.execute("DELETE FROM files WHERE scan_id != ?1", [scan_id])?)
+}
+
+fn ordered<'a>(a: &'a str, b: &'a str) -> (&'a str, &'a str) {
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+pub fn cached_local_difference(
+    conn: &Connection,
+    sha_a: &str,
+    sha_b: &str,
+    method: i64,
+) -> Result<Option<f64>> {
+    let (a, b) = ordered(sha_a, sha_b);
+    Ok(conn
+        .query_row(
+            "SELECT score FROM local_differences WHERE sha_a = ?1 AND sha_b = ?2 AND method = ?3",
+            params![a, b, method],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+pub fn store_local_difference(
+    conn: &Connection,
+    sha_a: &str,
+    sha_b: &str,
+    method: i64,
+    score: f64,
+) -> Result<()> {
+    let (a, b) = ordered(sha_a, sha_b);
+    conn.execute(
+        "INSERT OR REPLACE INTO local_differences (sha_a, sha_b, method, score) VALUES (?1, ?2, ?3, ?4)",
+        params![a, b, method, score],
+    )?;
+    Ok(())
+}
+
+/// Drops cached scores for contents that are no longer in any scanned file, or from an old method.
+pub fn prune_local_differences(conn: &Connection, method: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM local_differences
+         WHERE method != ?1
+            OR sha_a NOT IN (SELECT sha256 FROM files)
+            OR sha_b NOT IN (SELECT sha256 FROM files)",
+        [method],
+    )?;
+    Ok(())
 }
 
 pub fn delete_file_row(conn: &Connection, id: i64) -> Result<()> {

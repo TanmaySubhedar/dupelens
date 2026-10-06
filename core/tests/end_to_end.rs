@@ -273,3 +273,72 @@ fn same_folder_under_different_spellings_is_stored_once() {
     let g = &engine.groups().unwrap()[0];
     assert_eq!(g.members.len(), 3);
 }
+
+/// An app-window-like screen: header bar, dark sidebar, side panel and lines of "text".
+/// `variant` 1 rewrites a short stretch of one line, like a ticking timer.
+fn screen(variant: u32) -> DynamicImage {
+    DynamicImage::ImageRgb8(RgbImage::from_fn(1600, 1000, |x, y| {
+        if y < 80 {
+            return Rgb([40, 60, 120]); // header bar
+        }
+        if x < 250 {
+            return Rgb([30, 30, 35]); // sidebar
+        }
+        if (1150..1550).contains(&x) && (150..850).contains(&y) {
+            return Rgb([200, 210, 225]); // side panel
+        }
+        let line = y / 40;
+        let in_text = y % 40 < 16 && (320..1050).contains(&x);
+        let ink = match (line, variant) {
+            (12, 1) if x < 470 => (x / 23) % 3 != 0,
+            _ => (x / 17 + line) % 4 != 0,
+        };
+        if in_text && ink {
+            Rgb([40, 40, 40])
+        } else {
+            Rgb([245, 245, 240])
+        }
+    }))
+}
+
+#[test]
+fn screenshots_with_a_changed_line_are_not_duplicates() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("shots");
+    save(&screen(0), &root.join("before.png"), ImageFormat::Png);
+    save(&screen(1), &root.join("after.png"), ImageFormat::Png);
+    save(
+        &screen(0).resize_exact(800, 500, image::imageops::FilterType::Lanczos3),
+        &root.join("before-small.jpg"),
+        ImageFormat::Jpeg,
+    );
+
+    // The hashes alone cannot tell them apart; that is what the pixel check is for.
+    let analyse = |n: &str| {
+        let p = root.join(n);
+        dupelens_core::metadata::analyze(&p, fs::metadata(&p).unwrap().len()).unwrap()
+    };
+    let (a, b) = (analyse("before.png"), analyse("after.png"));
+    let d = dupelens_core::hashing::hamming(a.hashes.unwrap().phash, b.hashes.unwrap().phash);
+    assert!(
+        d <= 8,
+        "test needs a pHash match to be meaningful (distance {d})"
+    );
+
+    let mut engine = Engine::open_in_memory().unwrap();
+    engine.add_folder(&root).unwrap();
+    engine.scan(&|_| {}).unwrap();
+    let groups = engine.groups().unwrap();
+    assert_eq!(groups.len(), 1, "{groups:#?}");
+    let mut names: Vec<String> = groups[0]
+        .members
+        .iter()
+        .map(|m| name(&m.file.path))
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        ["before-small.jpg", "before.png"],
+        "resized copy kept, edited screen excluded"
+    );
+}

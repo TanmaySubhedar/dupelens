@@ -80,6 +80,17 @@ pub fn analyze(path: &Path, size: u64) -> std::io::Result<Analysis> {
     Ok(analysis)
 }
 
+/// Decodes a file into upright grayscale pixels for [`hashing::local_difference`].
+/// Returns `None` for formats we cannot decode.
+pub fn load_gray(path: &Path) -> std::io::Result<Option<image::GrayImage>> {
+    if !crate::scanner::is_decodable(path) {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(path)?;
+    let orientation = read_exif(&mut Cursor::new(&bytes)).orientation;
+    Ok(decode(&bytes).map(|img| apply_orientation(img, orientation).to_luma8()))
+}
+
 fn decode(bytes: &[u8]) -> Option<DynamicImage> {
     ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()

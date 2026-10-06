@@ -95,5 +95,11 @@ flutter_rust_bridge's naming conventions without the generator available to chec
   (`MANAGE_EXTERNAL_STORAGE`), and Google Play restricts that permission. The alternative,
   MediaStore/SAF, means reading files through Dart/Kotlin. No OS trash on Android:
   permanent delete only (Android's MediaStore trash would need a platform channel).
-- Thresholds (pHash ≤ 8, dHash ≤ 12) are tuned on synthetic images; tune on real libraries.
+- Thresholds: pHash ≤ 8 and dHash ≤ 12 were tuned on synthetic images. The pixel check
+  (≤ 18) was calibrated on real screenshots (distinct screens scored 35–71) against copies
+  degraded down to 25% size at JPEG quality 30 (≤ 10). It hasn't been tuned on a large camera
+  library yet. Bump `LOCAL_DIFFERENCE_METHOD` in `core/src/lib.rs` whenever the
+  scoring algorithm changes, so cached scores are recomputed.
+- The pixel check also rejects **crops and rotations by an editor** (not EXIF rotation). Those
+  belong to Phase 3 ("similar"), not duplicates.
 - No scan cancellation yet.

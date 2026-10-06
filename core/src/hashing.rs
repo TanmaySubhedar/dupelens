@@ -119,6 +119,38 @@ pub fn phash(gray: &GrayImage) -> u64 {
         .fold(0u64, |acc, (i, &c)| acc | (((c > median) as u64) << i))
 }
 
+/// Pixel-level difference between two pictures, robust to resizing and recompression.
+///
+/// Both images are squashed to 512x512, lightly blurred (to cancel out compression noise and
+/// resampling differences), and split into 8x8-pixel patches. The score is the mean absolute
+/// difference (0-255) of the *most different* patch. Re-encoded or resized copies differ a
+/// little everywhere, so every patch scores low. Pictures with real changes, like two
+/// screenshots of one window with different text, match almost everywhere but differ
+/// strongly in a few patches, which drives the score up.
+pub fn local_difference(a: &GrayImage, b: &GrayImage) -> f64 {
+    const SIZE: u32 = 512;
+    const PATCH: u32 = 8;
+    let prep =
+        |g: &GrayImage| imageops::blur(&imageops::resize(g, SIZE, SIZE, FilterType::Triangle), 1.0);
+    let (a, b) = (prep(a), prep(b));
+    let (pa, pb) = (a.as_raw(), b.as_raw());
+    let mut worst = 0u32;
+    for py in 0..SIZE / PATCH {
+        for px in 0..SIZE / PATCH {
+            let mut sum = 0u32;
+            for y in py * PATCH..(py + 1) * PATCH {
+                let row = (y * SIZE) as usize;
+                for x in px * PATCH..(px + 1) * PATCH {
+                    let i = row + x as usize;
+                    sum += pa[i].abs_diff(pb[i]) as u32;
+                }
+            }
+            worst = worst.max(sum);
+        }
+    }
+    worst as f64 / (PATCH * PATCH) as f64
+}
+
 /// Sharpness score: variance of the 4-neighbour Laplacian on a fixed 256x256 thumbnail.
 /// Blurry images have weak edges and therefore a low score. Normalising the size makes
 /// scores comparable between copies of the same picture at different resolutions.

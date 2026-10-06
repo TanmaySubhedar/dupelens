@@ -66,6 +66,10 @@ pub struct DeleteReport {
     pub bytes_freed: u64,
 }
 
+/// Version of [`hashing::local_difference`]; bump when its algorithm changes so cached
+/// scores are recomputed.
+const LOCAL_DIFFERENCE_METHOD: i64 = 1;
+
 /// Whether [`DeleteMode::Trash`] works on this platform.
 pub const fn trash_supported() -> bool {
     cfg!(any(
@@ -197,16 +201,55 @@ impl Engine {
             }
         }
         summary.files_removed = db::prune_unseen(&tx, scan_id)?;
+        db::prune_local_differences(&tx, LOCAL_DIFFERENCE_METHOD)?;
         tx.commit()?;
         Ok(summary)
     }
 
     /// Duplicate groups from the most recent scan, largest reclaimable space first.
+    ///
+    /// Look-alike candidates are compared pixel by pixel (reading the two files) the first
+    /// time they meet; the score is cached, so later calls only read the database.
     pub fn groups(&self) -> Result<Vec<DuplicateGroup>> {
-        Ok(grouping::build_groups(
-            db::all_files(&self.conn)?,
-            &self.grouping,
-        ))
+        let mut db_error = None;
+        let mut compare = |a: &FileRecord, b: &FileRecord| -> Option<f64> {
+            match db::cached_local_difference(
+                &self.conn,
+                &a.sha256,
+                &b.sha256,
+                LOCAL_DIFFERENCE_METHOD,
+            ) {
+                Ok(Some(score)) => return Some(score),
+                Ok(None) => {}
+                Err(e) => {
+                    db_error.get_or_insert(e);
+                    return None;
+                }
+            }
+            // Unreadable or undecodable right now (e.g. file moved): don't cache, don't match.
+            let (Ok(Some(ga)), Ok(Some(gb))) =
+                (metadata::load_gray(&a.path), metadata::load_gray(&b.path))
+            else {
+                return None;
+            };
+            let score = hashing::local_difference(&ga, &gb);
+            if let Err(e) = db::store_local_difference(
+                &self.conn,
+                &a.sha256,
+                &b.sha256,
+                LOCAL_DIFFERENCE_METHOD,
+                score,
+            ) {
+                db_error.get_or_insert(e);
+            }
+            Some(score)
+        };
+        let groups =
+            grouping::build_groups(db::all_files(&self.conn)?, &self.grouping, &mut compare);
+        match db_error {
+            Some(e) => Err(e),
+            None => Ok(groups),
+        }
     }
 
     /// Deletes exactly the given files after the user has confirmed.

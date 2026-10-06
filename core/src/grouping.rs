@@ -4,7 +4,9 @@
 //! 1. Files with the same SHA-256 are confirmed duplicates.
 //! 2. One representative per distinct SHA-256 is matched against the others by pHash,
 //!    using a BK-tree so we never compare every pair.
-//! 3. Metadata verification: a pHash match must also agree on dHash and aspect ratio.
+//! 3. Verification: a pHash match must also agree on dHash and aspect ratio, and then pass a
+//!    pixel-level comparison. Hashes only see the broad layout, so two screenshots of the same
+//!    window with different text hash identically; the pixel check catches the changed spots.
 //! 4. Matches are merged with union-find into groups.
 //! 5. Each group gets a recommendation.
 
@@ -21,6 +23,9 @@ pub struct GroupingConfig {
     pub dhash_max: u32,
     /// Max relative difference in aspect ratio (0.05 = 5%).
     pub aspect_tolerance: f64,
+    /// Max [`crate::hashing::local_difference`] score. Re-encoded or resized copies of one
+    /// picture score under ~10; pictures with real changes, even small ones, score over ~35.
+    pub max_local_difference: f64,
 }
 
 impl Default for GroupingConfig {
@@ -29,6 +34,7 @@ impl Default for GroupingConfig {
             phash_max: 8,
             dhash_max: 12,
             aspect_tolerance: 0.05,
+            max_local_difference: 18.0,
         }
     }
 }
@@ -120,7 +126,15 @@ fn is_near_match(a: &FileRecord, b: &FileRecord, cfg: &GroupingConfig) -> bool {
     hamming(da, db) <= cfg.dhash_max && aspect_close(a, b, cfg.aspect_tolerance)
 }
 
-pub fn build_groups(files: Vec<FileRecord>, cfg: &GroupingConfig) -> Vec<DuplicateGroup> {
+/// Pixel-level comparison of two files that passed the hash checks: returns their
+/// [`crate::hashing::local_difference`] score, or `None` if they could not be compared.
+pub type LocalDifferenceFn<'a> = dyn FnMut(&FileRecord, &FileRecord) -> Option<f64> + 'a;
+
+pub fn build_groups(
+    files: Vec<FileRecord>,
+    cfg: &GroupingConfig,
+    local_difference: &mut LocalDifferenceFn,
+) -> Vec<DuplicateGroup> {
     let mut uf = UnionFind::new(files.len());
 
     // 1. Exact duplicates.
@@ -148,7 +162,10 @@ pub fn build_groups(files: Vec<FileRecord>, cfg: &GroupingConfig) -> Vec<Duplica
         hits.clear();
         tree.within(ph, cfg.phash_max, &mut hits);
         for &j in &hits {
-            if is_near_match(&files[i], &files[j], cfg) {
+            if is_near_match(&files[i], &files[j], cfg)
+                && local_difference(&files[i], &files[j])
+                    .is_some_and(|d| d <= cfg.max_local_difference)
+            {
                 uf.union(i, j);
             }
         }
@@ -243,7 +260,7 @@ mod tests {
             rec(2, "aaa", 0, 0, 10, 10),
             rec(3, "bbb", u64::MAX, u64::MAX, 10, 10),
         ];
-        let groups = build_groups(files, &GroupingConfig::default());
+        let groups = build_groups(files, &GroupingConfig::default(), &mut |_, _| Some(0.0));
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].kind, GroupKind::Exact);
         assert_eq!(groups[0].members.len(), 2);
@@ -256,7 +273,7 @@ mod tests {
             rec(2, "b", 0b0111, 0b0011, 2000, 1500), // 1 and 2 bits off
             rec(3, "c", !0b1111, !0b1111, 4000, 3000), // far away
         ];
-        let groups = build_groups(files, &GroupingConfig::default());
+        let groups = build_groups(files, &GroupingConfig::default(), &mut |_, _| Some(0.0));
         assert_eq!(groups.len(), 1);
         let g = &groups[0];
         assert_eq!(g.kind, GroupKind::Near);
@@ -267,7 +284,7 @@ mod tests {
     #[test]
     fn aspect_ratio_mismatch_blocks_a_near_match() {
         let files = vec![rec(1, "a", 0, 0, 4000, 3000), rec(2, "b", 0, 0, 3000, 3000)];
-        assert!(build_groups(files, &GroupingConfig::default()).is_empty());
+        assert!(build_groups(files, &GroupingConfig::default(), &mut |_, _| Some(0.0)).is_empty());
     }
 
     #[test]
@@ -277,9 +294,27 @@ mod tests {
             rec(2, "a", 0, 0, 100, 100),
             rec(3, "b", 1, 1, 50, 50),
         ];
-        let groups = build_groups(files, &GroupingConfig::default());
+        let groups = build_groups(files, &GroupingConfig::default(), &mut |_, _| Some(0.0));
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].members.len(), 3);
+    }
+
+    #[test]
+    fn pixel_check_can_veto_a_hash_match() {
+        let files = vec![rec(1, "a", 0, 0, 100, 100), rec(2, "b", 0, 0, 100, 100)];
+        let cfg = GroupingConfig::default();
+        assert!(build_groups(files.clone(), &cfg, &mut |_, _| Some(40.0)).is_empty());
+        assert!(build_groups(files.clone(), &cfg, &mut |_, _| None).is_empty());
+        assert_eq!(build_groups(files, &cfg, &mut |_, _| Some(5.0)).len(), 1);
+    }
+
+    #[test]
+    fn exact_duplicates_never_need_the_pixel_check() {
+        let files = vec![rec(1, "a", 0, 0, 100, 100), rec(2, "a", 0, 0, 100, 100)];
+        let groups = build_groups(files, &GroupingConfig::default(), &mut |_, _| {
+            panic!("identical bytes must not be pixel-compared")
+        });
+        assert_eq!(groups.len(), 1);
     }
 
     #[test]
