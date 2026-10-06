@@ -29,6 +29,13 @@ rest, and cleans up when you confirm. Nothing is ever uploaded.
 | Flutter bridge (`app/rust/`) | Written, **not compiled**: needs flutter_rust_bridge codegen, which needs Flutter |
 | Flutter UI (`app/lib/`) | Written, **not compiled or run**: Flutter is not installed on the dev machine yet |
 
+## Project docs
+
+- [docs/ROADMAP.md](docs/ROADMAP.md): where things stand, what's next, open questions
+- [docs/decisions/](docs/decisions/README.md): why things are the way they are (one record per decision)
+- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md): building, testing, toolchain setup
+- [docs/PRD-v1.md](docs/PRD-v1.md): the original product requirements
+
 ## Layout
 
 ```
