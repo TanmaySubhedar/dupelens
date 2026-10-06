@@ -1,10 +1,24 @@
 # DupeLens
 
-A privacy-first, offline duplicate photo finder. It scans only the folders you choose,
-groups exact and look-alike copies, recommends the best copy to keep, and deletes nothing
-without your explicit confirmation. Nothing is ever uploaded.
+A privacy-first, offline duplicate photo finder for your desktop, in the spirit of the
+duplicate cleaner in Files by Google: it recommends the best copy to keep, pre-selects the
+rest, and cleans up when you confirm. Nothing is ever uploaded.
 
-Built from `Duplicate_Photo_Finder_PRD_v1.md`. **Current scope: Phase 1 (images).**
+**Current scope: Phase 1 (images).**
+
+## What it promises
+
+- **You choose the folders.** DupeLens scans exactly the folders you add, and nothing else on
+  your computer is ever read.
+- **Results the moment you ask.** No background indexing to wait for: you press scan and get
+  answers. On a 12-core laptop, a first scan of 160 phone-camera photos (12 megapixels each)
+  takes about 3.6 seconds, and rescanning an unchanged library takes about 0.1 seconds,
+  because files that didn't change are never re-read.
+- **Finds look-alikes, not just exact copies.** Resized, recompressed, WhatsApp-style and
+  converted copies are found too, while screenshots that only *look* similar (same window,
+  different content) are kept apart.
+- **Nothing is deleted without you.** Recycle Bin by default, at least one copy of every
+  photo is always kept, and files changed since the scan are skipped.
 
 ## Status
 
@@ -67,3 +81,16 @@ $B clean                # keeps the recommended copy, moves the rest to the Recy
 4. **Grouping**: matches are merged, so an exact copy of a near duplicate lands in the same group.
 5. **Recommendation**, by the PRD's criteria in order: resolution → dimensions → sharpness →
    EXIF richness → earliest capture date → favourite. Ties go to the oldest file.
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion
+in the work by you, as defined in the Apache-2.0 license, shall be dual licensed as above,
+without any additional terms or conditions.

@@ -96,12 +96,34 @@ flutter_rust_bridge's naming conventions without the generator available to chec
   MediaStore/SAF, means reading files through Dart/Kotlin. No OS trash on Android:
   permanent delete only (Android's MediaStore trash would need a platform channel).
 - Thresholds: pHash ≤ 8 and dHash ≤ 12 were tuned on synthetic images. The pixel check (≤ 18)
-  was validated on a test library built from the 112 real screenshots in `Pictures`, with 38
-  planted copies (re-saved JPEG q60, WebP q70, WhatsApp-style 1600 px q70, half size q75,
-  quarter size q40): 38/38 found, 0 false groups. Genuine copies scored ≤ 7.7, and distinct
-  screenshots ≥ 34.2. It hasn't been tested on real camera photos or burst shots yet (none on the
-  dev machine). Bump `LOCAL_DIFFERENCE_METHOD` in `core/src/lib.rs` whenever the scoring
-  algorithm changes, so cached scores are recomputed.
+  was validated on a test library built from 112 real screenshots, with 38 planted copies
+  (re-saved JPEG q60, WebP q70, WhatsApp-style 1600 px q70, half size q75, quarter size q40):
+  38/38 found, 0 false groups. Genuine copies scored ≤ 8.9, and distinct screenshots ≥ 34.1.
+  It hasn't been tested on real camera photos or burst shots yet. Bump
+  `LOCAL_DIFFERENCE_METHOD` in `core/src/lib.rs` whenever the scoring changes, so cached
+  scores are recomputed.
 - The pixel check also rejects **crops and rotations by an editor** (not EXIF rotation). Those
   belong to Phase 3 ("similar"), not duplicates.
 - No scan cancellation yet.
+
+## Performance notes
+
+Benchmark: 160 synthetic 12-megapixel JPEGs (~2 MB each), 12-core laptop, release build.
+
+| Stage | Result |
+|---|---|
+| First scan, including pixel checks | ~3.6 s |
+| Rescan, nothing changed | ~0.1 s |
+| Full JPEG decode + 512 px thumbnail (`image` crate) | ~76 ms per photo, the bulk of analysis time |
+
+Things tried and rejected, so nobody repeats them:
+
+- **Reduced-scale JPEG decoding** (`jpeg-decoder` at 1/8 size): *slower* (~88 ms per photo),
+  because most of the cost is the compressed-data (entropy) decoding, which can't be skipped,
+  and the `image` crate's decoder is much better optimised.
+- **Quick `thumbnail()` pre-shrink before the pixel check:** fast, but its aliasing pushed
+  genuine copies' scores up to 16.8, too close to the threshold of 18. The pixel check now
+  converts to grayscale and shrinks with a smooth (Triangle) filter: same speed, max 8.9.
+
+The pixel check runs on all CPU cores, only for pairs that already passed the hash checks,
+and each pair's score is cached in SQLite.

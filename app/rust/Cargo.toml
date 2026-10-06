@@ -4,6 +4,7 @@ description = "flutter_rust_bridge layer exposing dupelens-core to the Flutter a
 version = "0.1.0"
 edition = "2021"
 publish = false
+license = "MIT OR Apache-2.0"
 
 [lib]
 crate-type = ["cdylib", "staticlib"]

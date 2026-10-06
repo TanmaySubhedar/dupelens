@@ -176,7 +176,7 @@ pub fn prune_unseen(conn: &Connection, scan_id: i64) -> Result<usize> {
     Ok(conn.execute("DELETE FROM files WHERE scan_id != ?1", [scan_id])?)
 }
 
-fn ordered<'a>(a: &'a str, b: &'a str) -> (&'a str, &'a str) {
+pub(crate) fn ordered<'a>(a: &'a str, b: &'a str) -> (&'a str, &'a str) {
     if a <= b {
         (a, b)
     } else {

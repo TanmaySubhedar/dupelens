@@ -80,16 +80,35 @@ pub fn analyze(path: &Path, size: u64) -> std::io::Result<Analysis> {
     Ok(analysis)
 }
 
-/// Decodes a file into upright grayscale pixels for [`hashing::local_difference`].
-/// Returns `None` for formats we cannot decode.
+/// Decodes a file into upright grayscale pixels for [`hashing::local_difference`], shrunk with
+/// a smooth filter so its *shorter* side is at most [`PRESHRINK_MIN_SIDE`]. The comparison
+/// never uses more detail than that, so the rest of the check works on small images instead of
+/// 12-megapixel ones. (A faster but rougher shrink was tried: its aliasing pushed genuine
+/// copies' scores up towards the threshold.) Returns `None` for formats we cannot decode.
 pub fn load_gray(path: &Path) -> std::io::Result<Option<image::GrayImage>> {
     if !crate::scanner::is_decodable(path) {
         return Ok(None);
     }
     let bytes = std::fs::read(path)?;
     let orientation = read_exif(&mut Cursor::new(&bytes)).orientation;
-    Ok(decode(&bytes).map(|img| apply_orientation(img, orientation).to_luma8()))
+    Ok(decode(&bytes).map(|img| {
+        let gray = apply_orientation(img, orientation).to_luma8();
+        let (w, h) = gray.dimensions();
+        let short = w.min(h);
+        if short <= PRESHRINK_MIN_SIDE {
+            return gray;
+        }
+        let scale = PRESHRINK_MIN_SIDE as f64 / short as f64;
+        let (nw, nh) = (
+            ((w as f64 * scale).round() as u32).max(1),
+            ((h as f64 * scale).round() as u32).max(1),
+        );
+        image::imageops::resize(&gray, nw, nh, image::imageops::FilterType::Triangle)
+    }))
 }
+
+/// Matches the 512-pixel comparison cap in [`hashing::local_difference`].
+const PRESHRINK_MIN_SIDE: u32 = 512;
 
 fn decode(bytes: &[u8]) -> Option<DynamicImage> {
     ImageReader::new(Cursor::new(bytes))

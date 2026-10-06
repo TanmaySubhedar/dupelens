@@ -19,7 +19,7 @@ pub use model::{DuplicateGroup, FileRecord, GroupKind, GroupMember};
 use rayon::prelude::*;
 use rusqlite::Connection;
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -68,7 +68,7 @@ pub struct DeleteReport {
 
 /// Version of [`hashing::local_difference`]; bump when its algorithm changes so cached
 /// scores are recomputed.
-const LOCAL_DIFFERENCE_METHOD: i64 = 2;
+const LOCAL_DIFFERENCE_METHOD: i64 = 5;
 
 /// Whether [`DeleteMode::Trash`] works on this platform.
 pub const fn trash_supported() -> bool {
@@ -211,45 +211,51 @@ impl Engine {
     /// Look-alike candidates are compared pixel by pixel (reading the two files) the first
     /// time they meet; the score is cached, so later calls only read the database.
     pub fn groups(&self) -> Result<Vec<DuplicateGroup>> {
-        let mut db_error = None;
-        let mut compare = |a: &FileRecord, b: &FileRecord| -> Option<f64> {
-            match db::cached_local_difference(
-                &self.conn,
-                &a.sha256,
-                &b.sha256,
-                LOCAL_DIFFERENCE_METHOD,
-            ) {
-                Ok(Some(score)) => return Some(score),
-                Ok(None) => {}
-                Err(e) => {
-                    db_error.get_or_insert(e);
-                    return None;
-                }
-            }
-            // Unreadable or undecodable right now (e.g. file moved): don't cache, don't match.
-            let (Ok(Some(ga)), Ok(Some(gb))) =
-                (metadata::load_gray(&a.path), metadata::load_gray(&b.path))
-            else {
-                return None;
-            };
-            let score = hashing::local_difference(&ga, &gb);
-            if let Err(e) = db::store_local_difference(
-                &self.conn,
-                &a.sha256,
-                &b.sha256,
-                LOCAL_DIFFERENCE_METHOD,
-                score,
-            ) {
-                db_error.get_or_insert(e);
-            }
-            Some(score)
+        let files = db::all_files(&self.conn)?;
+        let key = |a: &FileRecord, b: &FileRecord| {
+            let (x, y) = db::ordered(&a.sha256, &b.sha256);
+            (x.to_owned(), y.to_owned())
         };
-        let groups =
-            grouping::build_groups(db::all_files(&self.conn)?, &self.grouping, &mut compare);
-        match db_error {
-            Some(e) => Err(e),
-            None => Ok(groups),
+
+        // Pixel-check every look-alike candidate: reuse cached scores, and compute the rest on
+        // all CPU cores at once (each check decodes two photos, so this is the slow part).
+        let mut scores: HashMap<(String, String), f64> = HashMap::new();
+        let mut missing = Vec::new();
+        for (i, j) in grouping::near_candidates(&files, &self.grouping) {
+            let k = key(&files[i], &files[j]);
+            match db::cached_local_difference(&self.conn, &k.0, &k.1, LOCAL_DIFFERENCE_METHOD)? {
+                Some(score) => {
+                    scores.insert(k, score);
+                }
+                None => missing.push((i, j, k)),
+            }
         }
+        let computed: Vec<_> = missing
+            .into_par_iter()
+            .map(|(i, j, k)| {
+                // Unreadable or undecodable right now (e.g. file moved): no score, no match.
+                let score = match (
+                    metadata::load_gray(&files[i].path),
+                    metadata::load_gray(&files[j].path),
+                ) {
+                    (Ok(Some(a)), Ok(Some(b))) => Some(hashing::local_difference(&a, &b)),
+                    _ => None,
+                };
+                (k, score)
+            })
+            .collect();
+        for (k, score) in computed {
+            if let Some(score) = score {
+                db::store_local_difference(&self.conn, &k.0, &k.1, LOCAL_DIFFERENCE_METHOD, score)?;
+                scores.insert(k, score);
+            }
+        }
+
+        Ok(grouping::build_groups(
+            files,
+            &self.grouping,
+            &mut |a, b| scores.get(&key(a, b)).copied(),
+        ))
     }
 
     /// Deletes exactly the given files after the user has confirmed.

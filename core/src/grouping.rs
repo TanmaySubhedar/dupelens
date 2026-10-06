@@ -130,6 +130,41 @@ fn is_near_match(a: &FileRecord, b: &FileRecord, cfg: &GroupingConfig) -> bool {
 /// [`crate::hashing::local_difference`] score, or `None` if they could not be compared.
 pub type LocalDifferenceFn<'a> = dyn FnMut(&FileRecord, &FileRecord) -> Option<f64> + 'a;
 
+/// Index of the first file with each distinct SHA-256.
+fn first_of_each_content(files: &[FileRecord]) -> HashMap<&str, usize> {
+    let mut by_sha: HashMap<&str, usize> = HashMap::new();
+    for (i, f) in files.iter().enumerate() {
+        by_sha.entry(f.sha256.as_str()).or_insert(i);
+    }
+    by_sha
+}
+
+/// Pairs of files with *different* contents whose pHash, dHash and aspect ratio match:
+/// the candidates that still need the pixel check. One file stands in for each distinct
+/// content, so byte-identical copies never need comparing.
+pub fn near_candidates(files: &[FileRecord], cfg: &GroupingConfig) -> Vec<(usize, usize)> {
+    let mut reps: Vec<usize> = first_of_each_content(files)
+        .into_values()
+        .filter(|&i| files[i].phash.is_some())
+        .collect();
+    reps.sort_unstable();
+    let mut tree = BkTree::new();
+    let mut hits = Vec::new();
+    let mut pairs = Vec::new();
+    for &i in &reps {
+        let ph = files[i].phash.expect("filtered");
+        hits.clear();
+        tree.within(ph, cfg.phash_max, &mut hits);
+        pairs.extend(
+            hits.iter()
+                .filter(|&&j| is_near_match(&files[i], &files[j], cfg))
+                .map(|&j| (j, i)),
+        );
+        tree.insert(ph, i);
+    }
+    pairs
+}
+
 pub fn build_groups(
     files: Vec<FileRecord>,
     cfg: &GroupingConfig,
@@ -138,38 +173,16 @@ pub fn build_groups(
     let mut uf = UnionFind::new(files.len());
 
     // 1. Exact duplicates.
-    let mut by_sha: HashMap<&str, usize> = HashMap::new();
+    let firsts = first_of_each_content(&files);
     for (i, f) in files.iter().enumerate() {
-        match by_sha.get(f.sha256.as_str()) {
-            Some(&first) => uf.union(first, i),
-            None => {
-                by_sha.insert(&f.sha256, i);
-            }
-        }
+        uf.union(firsts[f.sha256.as_str()], i);
     }
 
-    // 2-3. Near duplicates among one representative per distinct content.
-    let mut reps: Vec<usize> = by_sha
-        .values()
-        .copied()
-        .filter(|&i| files[i].phash.is_some())
-        .collect();
-    reps.sort_unstable();
-    let mut tree = BkTree::new();
-    let mut hits = Vec::new();
-    for &i in &reps {
-        let ph = files[i].phash.expect("filtered");
-        hits.clear();
-        tree.within(ph, cfg.phash_max, &mut hits);
-        for &j in &hits {
-            if is_near_match(&files[i], &files[j], cfg)
-                && local_difference(&files[i], &files[j])
-                    .is_some_and(|d| d <= cfg.max_local_difference)
-            {
-                uf.union(i, j);
-            }
+    // 2-3. Near duplicates: hash candidates that also pass the pixel check.
+    for (i, j) in near_candidates(&files, cfg) {
+        if local_difference(&files[i], &files[j]).is_some_and(|d| d <= cfg.max_local_difference) {
+            uf.union(i, j);
         }
-        tree.insert(ph, i);
     }
 
     // 4. Collect groups of two or more.
