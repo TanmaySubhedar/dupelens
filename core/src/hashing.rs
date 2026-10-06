@@ -121,25 +121,31 @@ pub fn phash(gray: &GrayImage) -> u64 {
 
 /// Pixel-level difference between two pictures, robust to resizing and recompression.
 ///
-/// Both images are squashed to 512x512, lightly blurred (to cancel out compression noise and
-/// resampling differences), and split into 8x8-pixel patches. The score is the mean absolute
-/// difference (0-255) of the *most different* patch. Re-encoded or resized copies differ a
-/// little everywhere, so every patch scores low. Pictures with real changes, like two
+/// Both images are resized to a common grid, lightly blurred (to cancel out compression noise
+/// and resampling differences), and split into 8x8-pixel patches. The score is the mean
+/// absolute difference (0-255) of the *most different* patch. Re-encoded or resized copies
+/// differ a little everywhere, so every patch scores low. Pictures with real changes, like two
 /// screenshots of one window with different text, match almost everywhere but differ
 /// strongly in a few patches, which drives the score up.
+///
+/// The grid is the smaller image's own width and height, capped at 512. Comparing at a
+/// higher resolution than the smaller image has would enlarge its blurred detail next to the
+/// original's crisp detail (small text, for instance) and make a genuine copy look different.
 pub fn local_difference(a: &GrayImage, b: &GrayImage) -> f64 {
-    const SIZE: u32 = 512;
+    const MAX_SIZE: u32 = 512;
     const PATCH: u32 = 8;
+    let w = a.width().min(b.width()).clamp(PATCH, MAX_SIZE);
+    let h = a.height().min(b.height()).clamp(PATCH, MAX_SIZE);
     let prep =
-        |g: &GrayImage| imageops::blur(&imageops::resize(g, SIZE, SIZE, FilterType::Triangle), 1.0);
+        |g: &GrayImage| imageops::blur(&imageops::resize(g, w, h, FilterType::Triangle), 1.0);
     let (a, b) = (prep(a), prep(b));
     let (pa, pb) = (a.as_raw(), b.as_raw());
     let mut worst = 0u32;
-    for py in 0..SIZE / PATCH {
-        for px in 0..SIZE / PATCH {
+    for py in 0..h / PATCH {
+        for px in 0..w / PATCH {
             let mut sum = 0u32;
             for y in py * PATCH..(py + 1) * PATCH {
-                let row = (y * SIZE) as usize;
+                let row = (y * w) as usize;
                 for x in px * PATCH..(px + 1) * PATCH {
                     let i = row + x as usize;
                     sum += pa[i].abs_diff(pb[i]) as u32;

@@ -342,3 +342,39 @@ fn screenshots_with_a_changed_line_are_not_duplicates() {
         "resized copy kept, edited screen excluded"
     );
 }
+
+#[test]
+fn shrunken_copy_of_a_small_capture_is_still_a_duplicate() {
+    // A partial-window capture (small) full of fine text, and a quarter-size low-quality copy.
+    // Comparing them at a resolution above the copy's own would blow its smudged text up
+    // against the crisp original and wrongly reject the match.
+    let capture = DynamicImage::ImageRgb8(RgbImage::from_fn(720, 400, |x, y| {
+        if x < 90 {
+            return Rgb([30, 30, 35]);
+        }
+        let in_text = y % 14 < 7 && (110..650).contains(&x) && y > 30;
+        if in_text && (x / 3 + y / 7) % 3 != 0 {
+            Rgb([30, 30, 30])
+        } else {
+            Rgb([250, 250, 250])
+        }
+    }));
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("shots");
+    save(&capture, &root.join("capture.png"), ImageFormat::Png);
+    let tiny = capture
+        .resize_exact(180, 100, image::imageops::FilterType::Triangle)
+        .to_rgb8();
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 40)
+        .encode_image(&tiny)
+        .unwrap();
+    fs::write(root.join("capture-tiny.jpg"), jpeg).unwrap();
+
+    let mut engine = Engine::open_in_memory().unwrap();
+    engine.add_folder(&root).unwrap();
+    engine.scan(&|_| {}).unwrap();
+    let groups = engine.groups().unwrap();
+    assert_eq!(groups.len(), 1, "quarter-size copy must be found");
+    assert_eq!(groups[0].members.len(), 2);
+}

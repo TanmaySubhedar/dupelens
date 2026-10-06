@@ -10,7 +10,7 @@ Built from `Duplicate_Photo_Finder_PRD_v1.md`. **Current scope: Phase 1 (images)
 
 | Part | State |
 |---|---|
-| Rust core engine (`core/`) | Built and tested: 26 unit + 12 end-to-end tests pass |
+| Rust core engine (`core/`) | Built and tested: 26 unit + 13 end-to-end tests pass |
 | `dupelens` CLI (`core/src/bin/`) | Built; tried by hand on a sample library |
 | Flutter bridge (`app/rust/`) | Written, **not compiled**: needs flutter_rust_bridge codegen, which needs Flutter |
 | Flutter UI (`app/lib/`) | Written, **not compiled or run**: Flutter is not installed on the dev machine yet |
@@ -59,10 +59,11 @@ $B clean                # keeps the recommended copy, moves the rest to the Recy
 3. **Verification**: a pHash match must also agree on dHash (≤ 12 bits) and aspect ratio
    (within 5%), and then pass a **pixel check**. Hashes only see the broad layout, so two
    screenshots of the same window with different text look identical to them. The pixel
-   check shrinks both images to 512×512, splits them into 8×8 patches and rejects the match
-   if any patch differs strongly (score > 18). Resized or recompressed copies score ≤ ~10;
-   screens with small real changes score ≥ ~35. Scores are cached in the database, so each
-   pair is compared only once.
+   check shrinks both images to a common size (the smaller image's own size, at most 512), splits
+   them into 8×8 patches and rejects the match if any patch differs strongly (score > 18). On a
+   test library built from real screenshots, genuine copies (re-saved, WebP, WhatsApp-style,
+   half and quarter size) scored ≤ 7.7, and different screenshots scored ≥ 34. Scores are
+   cached in the database, so each pair is compared only once.
 4. **Grouping**: matches are merged, so an exact copy of a near duplicate lands in the same group.
 5. **Recommendation**, by the PRD's criteria in order: resolution → dimensions → sharpness →
    EXIF richness → earliest capture date → favourite. Ties go to the oldest file.

@@ -95,11 +95,13 @@ flutter_rust_bridge's naming conventions without the generator available to chec
   (`MANAGE_EXTERNAL_STORAGE`), and Google Play restricts that permission. The alternative,
   MediaStore/SAF, means reading files through Dart/Kotlin. No OS trash on Android:
   permanent delete only (Android's MediaStore trash would need a platform channel).
-- Thresholds: pHash ≤ 8 and dHash ≤ 12 were tuned on synthetic images. The pixel check
-  (≤ 18) was calibrated on real screenshots (distinct screens scored 35–71) against copies
-  degraded down to 25% size at JPEG quality 30 (≤ 10). It hasn't been tuned on a large camera
-  library yet. Bump `LOCAL_DIFFERENCE_METHOD` in `core/src/lib.rs` whenever the
-  scoring algorithm changes, so cached scores are recomputed.
+- Thresholds: pHash ≤ 8 and dHash ≤ 12 were tuned on synthetic images. The pixel check (≤ 18)
+  was validated on a test library built from the 112 real screenshots in `Pictures`, with 38
+  planted copies (re-saved JPEG q60, WebP q70, WhatsApp-style 1600 px q70, half size q75,
+  quarter size q40): 38/38 found, 0 false groups. Genuine copies scored ≤ 7.7, and distinct
+  screenshots ≥ 34.2. It hasn't been tested on real camera photos or burst shots yet (none on the
+  dev machine). Bump `LOCAL_DIFFERENCE_METHOD` in `core/src/lib.rs` whenever the scoring
+  algorithm changes, so cached scores are recomputed.
 - The pixel check also rejects **crops and rotations by an editor** (not EXIF rotation). Those
   belong to Phase 3 ("similar"), not duplicates.
 - No scan cancellation yet.

@@ -68,7 +68,7 @@ pub struct DeleteReport {
 
 /// Version of [`hashing::local_difference`]; bump when its algorithm changes so cached
 /// scores are recomputed.
-const LOCAL_DIFFERENCE_METHOD: i64 = 1;
+const LOCAL_DIFFERENCE_METHOD: i64 = 2;
 
 /// Whether [`DeleteMode::Trash`] works on this platform.
 pub const fn trash_supported() -> bool {
