@@ -1,30 +1,16 @@
-//! `dupelens` command-line interface: a thin front-end over the core engine, mainly for
-//! development and power users until the Flutter app ships.
+//! The `dupelens` command-line commands, shared by the app (`desktop/`, where running
+//! `dupelens <command>` in a terminal uses them) and the window-less `dupelens-cli`.
+//! Each binary adds its own entry point; see `src/bin/dupelens-cli.rs`.
 
+use crate::{trash_supported, DeleteMode, DuplicateGroup, Engine, GroupKind, ScanPhase};
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
-use dupelens_core::{trash_supported, DeleteMode, DuplicateGroup, Engine, GroupKind, ScanPhase};
+use clap::Subcommand;
 use std::collections::HashSet;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
-#[derive(Parser)]
-#[command(
-    name = "dupelens",
-    version,
-    about = "Find and clean up duplicate photos, entirely offline."
-)]
-struct Cli {
-    /// Database file (defaults to the per-user app data folder).
-    #[arg(long, global = true)]
-    db: Option<PathBuf>,
-
-    #[command(subcommand)]
-    command: Command,
-}
-
 #[derive(Subcommand)]
-enum Command {
+pub enum Command {
     /// Manage which folders are scanned. Nothing outside these folders is ever read.
     Folders {
         #[command(subcommand)]
@@ -59,13 +45,14 @@ enum Command {
 }
 
 #[derive(Subcommand)]
-enum FolderAction {
+pub enum FolderAction {
     List,
     Add { paths: Vec<PathBuf> },
     Remove { paths: Vec<PathBuf> },
 }
 
-fn default_db() -> Result<PathBuf> {
+/// `%LOCALAPPDATA%\DupeLens\dupelens.db` on Windows, the equivalent elsewhere.
+pub fn default_db() -> Result<PathBuf> {
     let base = dirs::data_local_dir().context("cannot locate the app data folder; pass --db")?;
     Ok(base.join("DupeLens").join("dupelens.db"))
 }
@@ -85,25 +72,28 @@ fn human_bytes(n: u64) -> String {
     }
 }
 
-fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let db = match cli.db {
-        Some(p) => p,
-        None => default_db()?,
-    };
-    let mut engine = Engine::open(&db).with_context(|| format!("opening {}", db.display()))?;
-
-    match cli.command {
-        Command::Folders { action } => folders(&engine, action),
-        Command::Scan => scan(&mut engine),
-        Command::Groups { json, limit } => groups(&engine, json, limit),
+/// Runs one command against an open engine.
+pub fn run(engine: &mut Engine, command: Command) -> Result<()> {
+    match command {
+        Command::Folders { action } => folders(engine, action),
+        Command::Scan => scan(engine),
+        Command::Groups { json, limit } => groups(engine, json, limit),
         Command::Clean {
             groups,
             exact_only,
             permanent,
             yes,
-        } => clean(&mut engine, &groups, exact_only, permanent, yes),
+        } => clean(engine, &groups, exact_only, permanent, yes),
     }
+}
+
+/// Opens the database at `db`, or at the per-user default location.
+pub fn open_engine(db: Option<PathBuf>) -> Result<Engine> {
+    let db = match db {
+        Some(p) => p,
+        None => default_db()?,
+    };
+    Engine::open(&db).with_context(|| format!("opening {}", db.display()))
 }
 
 fn folders(engine: &Engine, action: FolderAction) -> Result<()> {

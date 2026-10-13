@@ -41,6 +41,37 @@ linked by the broken path and crashes.
 
 Machines with the MSVC Build Tools (and macOS/Linux) use plain `cargo test`.
 
+## Building the Tauri app (`desktop/`) without MSVC
+
+```bash
+source scripts/desktop-env.sh   # once per shell; builds two small helper tools on first use
+cd desktop
+cargo build                     # plain cargo, NOT cargo-zigbuild
+DUPELENS_DB=/tmp/test.db ./target/debug/dupelens-desktop.exe   # optional: a throwaway database
+```
+
+`cargo-zigbuild build` works for the CLI but **not** for Tauri. Three things had to be fixed,
+all in the programs Cargo builds and runs *during* the build (build scripts and proc-macros),
+which a plain CLI barely has:
+
+| Symptom | Cause | Fix in `scripts/desktop-env.sh` |
+|---|---|---|
+| Tauri's build script crashes on start: `0xc0000005` (access violation), before printing anything | With a target set (`cargo-zigbuild` always sets one), Cargo applies the linker setting **only to the app**. Build scripts are linked by Rust's bundled GNU `ld`, which produces broken programs here (see [0002](decisions/0002-windows-build-without-admin.md)). Exactly which input `ld` mishandles wasn't pinned down: the crashing and a working build script have identical import tables. | No target: `CARGO_BUILD_TARGET` is unset, so the linker setting covers build scripts and proc-macros too |
+| `tauri-macros`: `lld-link: error: too many exported symbols (got 69808, max 65535)` | rustc passes a DLL's export list as `-Wl,…\list.def`. `cargo-zigbuild` 0.23 **skips** that argument on purpose (`src/zig/linker_args.rs`), so LLD exports every symbol. Small DLLs survive; big proc-macros don't. | `scripts/zig-cc.py` rewrites it to a plain `list.def` input, which LLD accepts, then hands everything else to `cargo-zigbuild zig cc` for its usual clean-up. It must keep rustc's response-file name `linker-arguments`, because `cargo-zigbuild` only cleans up files with that name. |
+| `error calling dlltool 'dlltool.exe': program not found` | Import libraries for `windows-link` (raw-dylib) are made with `dlltool` | A copy of `cargo-zigbuild.exe` named `dlltool.exe` (it acts as Zig's dlltool under that name), in `target/zig-tools/` |
+| `tauri-winres … NotAttempted("windres")` | The icon/version resource is compiled by `windres`, which isn't installed. `embed-resource` ignores `RC` on Windows-GNU. | `scripts/windres-zig.rs`: a tiny `windres.exe` that translates the arguments for `zig rc /:output-format coff` |
+
+Also set: `CARGO_ZIGBUILD_ZIG_VERSION`/`CARGO_ZIGBUILD_ZIG_COMMAND` (what `cargo-zigbuild`'s own
+wrappers set), and `CARGO_PROFILE_DEV_DEBUG=0` (with debug info, each Tauri build script is
+~110 MB, and a debug build needs several GB of disk).
+
+How it was checked: the app was launched with `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333`,
+which lets the DevTools protocol drive the window. The `ui/` pages loaded, `invoke('api')` reached
+`Service`, a scan ran, and all previews loaded through the `thumb` scheme.
+
+On machines with the MSVC Build Tools (and on macOS/Linux), none of this is needed:
+`cd desktop && cargo build`.
+
 ## Getting the Flutter app running (not done yet)
 
 Flutter on Windows desktop **also requires the MSVC Build Tools** ("Desktop development
@@ -84,7 +115,7 @@ flutter_rust_bridge's naming conventions without the generator available to chec
 | "Favorite flag (if available)" | EXIF/XMP star rating ≥ 4 counts as favourite. |
 | "Better image quality" | Sharpness (edge strength on a normalised thumbnail); differences under ~19% are treated as equal. |
 | "Largest dimensions" vs "Highest resolution" | Resolution = pixel count; dimensions = longest side (tie-breaker). |
-| Batch actions | *Keep Recommended* and *Clear Selection* apply to all groups; *Restore Group* resets one group to the recommendation; *Manual Selection* = tap a photo; *Review Before Deleting* = the review screen. |
+| Batch actions | *Keep Recommended* and *Clear Selection* apply to all groups (in the UI: to the groups shown by the current filter, labelled "(shown groups)"); *Restore Group* resets one group to the recommendation; *Manual Selection* = tap a photo; *Review Before Deleting* = the review screen. |
 | Favourite is listed last | Kept in PRD order, so it only breaks exact ties. Worth reconsidering: users may expect a favourite to always be kept. |
 
 ## Known gaps

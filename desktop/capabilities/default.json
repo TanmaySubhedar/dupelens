@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The DupeLens window: core IPC only. The folder dialog is opened from Rust, not from the page.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

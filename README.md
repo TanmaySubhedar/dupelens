@@ -24,8 +24,10 @@ rest, and cleans up when you confirm. Nothing is ever uploaded.
 
 | Part | State |
 |---|---|
-| Rust core engine (`core/`) | Built and tested: 26 unit + 13 end-to-end tests pass |
-| `dupelens` CLI (`core/src/bin/`) | Built; tried by hand on a sample library |
+| Rust core engine (`core/`) | Built and tested: 31 unit + 13 end-to-end tests pass |
+| **The app, `dupelens`** (`desktop/`, Tauri) | **The main program.** Opens a native window; `dupelens <command>` in a terminal runs the CLI commands. Scan flow and previews tested in the real window |
+| UI (`ui/`) | Plain HTML/CSS/JS shown by the app. Works, but the visual design is being redone |
+| `dupelens-cli` (`core/src/bin/`) | The same commands without a window, for servers and minimal Linux where the app can't start. See [docs/UI.md](docs/UI.md) for the UI contract |
 | Flutter bridge (`app/rust/`) | Written, **not compiled**: needs flutter_rust_bridge codegen, which needs Flutter |
 | Flutter UI (`app/lib/`) | Written, **not compiled or run**: Flutter is not installed on the dev machine yet |
 
@@ -48,26 +50,42 @@ dupelens/
 │   ├── src/recommend.rs  picks the copy to keep, with a plain-language reason
 │   ├── src/db.rs         SQLite: folders + per-file cache for incremental rescans
 │   ├── src/lib.rs        Engine API: folders, scan, groups, guarded delete
-│   └── src/bin/dupelens.rs   command-line front-end
+│   ├── src/service.rs    the engine as a UI backend: commands + previews (used by the Tauri app)
+│   ├── src/cli.rs        the terminal commands (scan, groups, clean...), used by both programs
+│   └── src/bin/dupelens-cli.rs   window-less variant (same commands, no app)
+├── ui/                   the UI: plain HTML/CSS/JS, no build step (shown by the Tauri app)
+├── desktop/              THE APP: `dupelens`, ui/ in a Tauri window + the CLI commands
 ├── app/                  Flutter app
 │   ├── rust/             bridge crate exposing the engine to Dart
 │   └── lib/              UI (talks to the engine via lib/src/service.dart)
 ├── scripts/dev-env.sh    toolchain setup for Windows without MSVC (see docs)
+├── scripts/desktop-env.sh   same, for the Tauri app (+ zig-cc.py, windres-zig.rs helpers)
 └── docs/DEVELOPMENT.md   setup, design decisions, open questions
 ```
 
-## Try the engine now (CLI)
+## Try it
 
 ```bash
-source scripts/dev-env.sh            # Windows/Git Bash without MSVC; see docs/DEVELOPMENT.md
-cargo-zigbuild build --release
-B=target/x86_64-pc-windows-gnu/release/dupelens.exe
+source scripts/desktop-env.sh        # Windows/Git Bash without MSVC; see docs/DEVELOPMENT.md
+cd desktop && cargo build --release  # with MSVC, or on macOS/Linux: just this line
+./target/release/dupelens.exe        # or double-click it: opens the app window
+```
 
+On Windows builds made without MSVC, keep `WebView2Loader.dll` next to `dupelens.exe`.
+
+## The same program from the terminal
+
+```bash
+B=desktop/target/release/dupelens.exe
 $B folders add "C:/Users/me/Pictures"
 $B scan                 # first scan analyses everything; later scans only new/changed files
 $B groups               # review what it found
 $B clean                # keeps the recommended copy, moves the rest to the Recycle Bin after you type 'delete'
 ```
+
+`--db <file>` (or `DUPELENS_DB`) uses a different database. Without a window or web engine
+(e.g. a server; the app needs WebKitGTK on Linux), `dupelens-cli` has the same commands: `cargo-zigbuild build --release`, then
+`target/x86_64-pc-windows-gnu/release/dupelens-cli.exe`.
 
 `clean` options: `--group <id>` (repeatable), `--exact-only`, `--permanent`, `--yes`.
 

@@ -1,8 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["core"]
-# Built by Flutter (cargokit) as its own package once bindings are generated.
-exclude = ["app/rust"]
+# app/rust: built by Flutter (cargokit) once bindings are generated.
+# desktop: the Tauri app; its own lockfile and target dir, so the CLI build stays light.
+exclude = ["app/rust", "desktop"]
 
 [workspace.package]
 version = "0.1.0"

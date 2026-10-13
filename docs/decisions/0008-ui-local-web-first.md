@@ -1,6 +1,6 @@
 # 0008: UI: local browser UI first (v0.1), Tauri later; Flutter code kept
 
-- **Status:** Proposed (agreed direction; not built yet)
+- **Status:** Superseded by [0012](0012-tauri-app-is-primary.md): the Tauri app is the one UI host and the browser host described here was removed (built 2026-10-07, removed 2026-10-10)
 - **Date:** 2026-10-06
 
 ## Context

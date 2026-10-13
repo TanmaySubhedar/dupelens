@@ -29,3 +29,6 @@ compiling, the Windows import libraries and the linking (via LLVM's LLD).
 - Official Windows release builds should use MSVC on CI (GitHub's Windows runners have it);
   see 0010. Flutter on Windows would still need the MSVC tools.
 - Machines with MSVC, and Linux/macOS, just use plain `cargo`.
+- The Tauri app (`desktop/`) needs more than `cargo-zigbuild`: build scripts and proc-macros
+  must be linked through Zig too, and three tools need stand-ins. That's `scripts/desktop-env.sh`
+  (2026-10-08; details in DEVELOPMENT.md, "Building the Tauri app").
