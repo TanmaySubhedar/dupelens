@@ -365,6 +365,12 @@ impl Service {
         let me = self.clone();
         std::thread::spawn(move || {
             let outcome = me.run_scan();
+            if outcome.is_err() {
+                // A scan that fails partway may already have changed the database, so the
+                // cached groups and thumbnails no longer match it. Drop them; `groups()`
+                // rebuilds them from the database on next use.
+                me.clear_results();
+            }
             *lock(&me.inner.status) = match outcome {
                 Ok(summary) => ScanStatus::Done { summary },
                 Err(e) => ScanStatus::Failed { error: e.message },
@@ -399,6 +405,11 @@ impl Service {
         };
         self.store_results(&groups);
         Ok(summary)
+    }
+
+    fn clear_results(&self) {
+        *lock(&self.inner.results) = None;
+        *lock(&self.inner.thumbs) = ThumbCache::default();
     }
 
     fn store_results(&self, groups: &[DuplicateGroup]) {

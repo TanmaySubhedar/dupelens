@@ -18,8 +18,9 @@ use clap::Parser;
 use dupelens_core::cli;
 use dupelens_core::service::{ApiError, Service};
 use dupelens_core::Engine;
-use std::path::PathBuf;
 use serde_json::{json, Value};
+use std::io::Write;
+use std::path::PathBuf;
 use tauri::{http, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
@@ -67,24 +68,62 @@ struct Args {
 
 fn main() {
     let args = Args::parse();
-    let engine = match cli::open_engine(args.db) {
-        Ok(engine) => engine,
-        Err(e) => fail(e),
-    };
-    let Some(command) = args.command else {
+    let window_mode = args.command.is_none();
+    if window_mode {
+        // Do this before anything can fail, so a startup error is shown in a dialog
+        // rather than in a console that flashes and closes.
         hide_own_console();
-        return open_window(engine);
+    }
+    // `_lock` stays alive until the process exits.
+    let (mut engine, _lock) = match cli::open_engine(args.db) {
+        Ok(opened) => opened,
+        Err(e) => fail(e, window_mode),
     };
-    let mut engine = engine;
-    if let Err(e) = cli::run(&mut engine, command) {
-        fail(e);
+    match args.command {
+        None => {
+            if let Err(e) = open_window(engine) {
+                fail(e, true);
+            }
+        }
+        Some(command) => {
+            if let Err(e) = cli::run(&mut engine, command) {
+                fail(e, false);
+            }
+        }
     }
 }
 
-fn fail(e: anyhow::Error) -> ! {
-    eprintln!("Error: {e:#}");
+/// Reports a fatal error and exits. The window has no console to print to, so it also gets a
+/// native dialog.
+fn fail(e: anyhow::Error, show_dialog: bool) -> ! {
+    // Dialog first, and stderr errors ignored: in window mode the console is already closed,
+    // and `eprintln!` panics when there is no stderr to write to.
+    if show_dialog {
+        show_error_dialog(&format!("{e:#}"));
+    }
+    let _ = writeln!(std::io::stderr(), "Error: {e:#}");
     std::process::exit(1)
 }
+
+#[cfg(windows)]
+fn show_error_dialog(message: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+    let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+    let (text, title) = (wide(message), wide("DupeLens"));
+    // SAFETY: both buffers are NUL-terminated and outlive the call; a null owner is allowed.
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONERROR,
+        )
+    };
+}
+
+// Elsewhere the error goes to stderr only (a native dialog needs a GUI toolkit running).
+#[cfg(not(windows))]
+fn show_error_dialog(_message: &str) {}
 
 /// Double-clicking a console program makes Windows open a console just for it. If nobody else
 /// is attached to ours (no terminal started us), close it so only the app window remains.
@@ -102,7 +141,7 @@ fn hide_own_console() {
 #[cfg(not(windows))]
 fn hide_own_console() {}
 
-fn open_window(engine: Engine) {
+fn open_window(engine: Engine) -> anyhow::Result<()> {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Service::new(engine))
@@ -121,9 +160,15 @@ fn open_window(engine: Engine) {
                         .body(jpeg.to_vec()),
                     None => http::Response::builder().status(404).body(Vec::new()),
                 };
-                responder.respond(response.expect("valid response"));
+                // The builder only fails on invalid headers, which these aren't; if it ever
+                // does, answer with a bare 500 rather than panicking the worker thread.
+                responder.respond(response.unwrap_or_else(|_| {
+                    let mut failed = http::Response::new(Vec::new());
+                    *failed.status_mut() = http::StatusCode::INTERNAL_SERVER_ERROR;
+                    failed
+                }));
             });
         })
         .run(tauri::generate_context!())
-        .expect("error while running DupeLens");
+        .map_err(|e| anyhow::anyhow!("the DupeLens window failed: {e}"))
 }

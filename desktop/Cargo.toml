@@ -24,7 +24,7 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
 
 # Image decoding is painfully slow unoptimised: optimise dependencies even in debug builds
 # (same as the workspace; desktop/ is outside it, so it needs its own copy).

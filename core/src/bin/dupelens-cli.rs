@@ -24,6 +24,6 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let mut engine = cli::open_engine(args.db)?;
+    let (mut engine, _lock) = cli::open_engine(args.db)?;
     cli::run(&mut engine, args.command)
 }

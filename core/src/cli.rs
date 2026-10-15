@@ -6,8 +6,9 @@ use crate::{trash_supported, DeleteMode, DuplicateGroup, Engine, GroupKind, Scan
 use anyhow::{bail, Context, Result};
 use clap::Subcommand;
 use std::collections::HashSet;
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Subcommand)]
 pub enum Command {
@@ -87,13 +88,48 @@ pub fn run(engine: &mut Engine, command: Command) -> Result<()> {
     }
 }
 
-/// Opens the database at `db`, or at the per-user default location.
-pub fn open_engine(db: Option<PathBuf>) -> Result<Engine> {
+/// Held for as long as this process uses the database. While it exists, no other DupeLens
+/// process (a second window, or a CLI scan beside the window) can open the same database.
+/// The operating system releases the lock when the process ends, even if it crashes.
+#[derive(Debug)]
+pub struct InstanceLock(#[allow(dead_code)] File);
+
+/// Opens the database at `db`, or at the per-user default location, and locks it against use
+/// by another DupeLens process. SQLite would serialise two writers, but each program caches
+/// the last scan's results and would silently show stale data once the other had changed them.
+pub fn open_engine(db: Option<PathBuf>) -> Result<(Engine, InstanceLock)> {
     let db = match db {
         Some(p) => p,
         None => default_db()?,
     };
-    Engine::open(&db).with_context(|| format!("opening {}", db.display()))
+    let lock = lock_database(&db)?;
+    let engine = Engine::open(&db).with_context(|| format!("opening {}", db.display()))?;
+    Ok((engine, lock))
+}
+
+fn lock_database(db: &Path) -> Result<InstanceLock> {
+    if let Some(dir) = db.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    let mut lock_path = db.as_os_str().to_owned();
+    lock_path.push(".lock");
+    let lock_path = PathBuf::from(lock_path);
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("opening {}", lock_path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(InstanceLock(file)),
+        Err(TryLockError::WouldBlock) => bail!(
+            "DupeLens is already running on {}. Close the other DupeLens window or command first (two at once could show out-of-date results).",
+            db.display()
+        ),
+        Err(TryLockError::Error(e)) => {
+            Err(e).with_context(|| format!("locking {}", lock_path.display()))
+        }
+    }
 }
 
 fn folders(engine: &Engine, action: FolderAction) -> Result<()> {
@@ -271,4 +307,24 @@ fn clean(
         println!("Skipped file {id}: {why}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    #[test]
+    fn second_open_of_same_database_is_refused_until_first_is_dropped() {
+        let dir = std::env::temp_dir().join(format!("dupelens-lock-{}", std::process::id()));
+        let db = dir.join("test.db");
+        let first = open_engine(Some(db.clone())).expect("first open");
+        let err = open_engine(Some(db.clone()))
+            .err()
+            .expect("second open must fail")
+            .to_string();
+        assert!(err.contains("already running"), "{err}");
+        drop(first);
+        open_engine(Some(db)).expect("open after release");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
