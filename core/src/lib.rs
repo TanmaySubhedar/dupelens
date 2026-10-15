@@ -3,6 +3,8 @@
 //! Nothing here touches the network. Files are only opened for reading until the user
 //! explicitly asks [`Engine::delete`] to remove specific files.
 
+#[cfg(feature = "cli")]
+pub mod cli;
 pub mod db;
 pub mod error;
 pub mod grouping;
@@ -11,6 +13,7 @@ pub mod metadata;
 pub mod model;
 pub mod recommend;
 pub mod scanner;
+pub mod service;
 
 pub use error::{Error, Result};
 pub use grouping::GroupingConfig;

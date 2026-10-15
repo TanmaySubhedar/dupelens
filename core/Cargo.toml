@@ -8,14 +8,24 @@ license.workspace = true
 [lib]
 name = "dupelens_core"
 
+# The main `dupelens` program is the desktop app (desktop/). This is the window-less variant:
+# the same commands in a terminal, for servers and for development.
 [[bin]]
-name = "dupelens"
-path = "src/bin/dupelens.rs"
+name = "dupelens-cli"
+path = "src/bin/dupelens-cli.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+# The terminal commands (`dupelens scan`, ...), shared by the app and dupelens-cli. The Tauri
+# app depends on this crate with `default-features = false` and talks to `service::Service`
+# through its own commands instead (see docs/UI.md).
+cli = ["dep:anyhow", "dep:clap", "dep:dirs"]
 
 [dependencies]
-anyhow = "1"
-clap = { version = "4", features = ["derive"] }
-dirs = "6"
+anyhow = { version = "1", optional = true }
+clap = { version = "4", features = ["derive", "env"], optional = true }
+dirs = { version = "6", optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp", "tiff", "rayon"] }
 kamadak-exif = "0.6"
 rayon = "1"

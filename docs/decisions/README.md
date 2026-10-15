@@ -21,9 +21,11 @@ are without reading the code or old chats.
 | [0005](0005-recommendation-rules.md) | How the "keep" recommendation is chosen | Needs confirmation (parts) | 2026-10-05 |
 | [0006](0006-deletion-safety.md) | Deletion safety rules and canonical folder paths | Accepted | 2026-10-05 |
 | [0007](0007-open-source-positioning-license-name.md) | Open source: positioning, MIT/Apache-2.0, keep the name DupeLens | Accepted | 2026-10-06 |
-| [0008](0008-ui-local-web-first.md) | UI: local browser UI first (v0.1), Tauri later; Flutter code kept | Proposed | 2026-10-06 |
+| [0008](0008-ui-local-web-first.md) | UI: local browser UI first (v0.1), Tauri later; Flutter code kept | Superseded by 0012 | 2026-10-06 |
 | [0009](0009-scan-performance.md) | "Not lazy": scan speed work and rejected optimisations | Accepted | 2026-10-06 |
 | [0010](0010-distribution-plan.md) | Distribution: GitHub Releases via CI, package managers, signing | Proposed | 2026-10-06 |
+| [0011](0011-one-ui-two-hosts.md) | One UI, two hosts: the browser UI runs unchanged in Tauri | Accepted (browser host removed 2026-10-10) | 2026-10-07 |
+| [0012](0012-tauri-app-is-primary.md) | The Tauri app is the main program; the browser UI becomes a fallback | Accepted | 2026-10-10 |
 
 See also: [ROADMAP](../ROADMAP.md) for what's next and open questions, and
 [PRD-v1](../PRD-v1.md) for the original product requirements.

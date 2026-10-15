@@ -107,6 +107,25 @@ pub fn load_gray(path: &Path) -> std::io::Result<Option<image::GrayImage>> {
     }))
 }
 
+/// An upright JPEG preview whose longest side is at most `max_side`, for showing in a UI.
+/// Returns `None` for formats we cannot decode (e.g. HEIC) and for very large files.
+pub fn preview_jpeg(path: &Path, max_side: u32) -> std::io::Result<Option<Vec<u8>>> {
+    if !crate::scanner::is_decodable(path) || std::fs::metadata(path)?.len() > MAX_IN_MEMORY {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(path)?;
+    let orientation = read_exif(&mut Cursor::new(&bytes)).orientation;
+    let Some(img) = decode(&bytes) else {
+        return Ok(None);
+    };
+    let img = apply_orientation(img.thumbnail(max_side, max_side), orientation).to_rgb8();
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 82)
+        .encode_image(&img)
+        .map_err(std::io::Error::other)?;
+    Ok(Some(out))
+}
+
 /// Matches the 512-pixel comparison cap in [`hashing::local_difference`].
 const PRESHRINK_MIN_SIDE: u32 = 512;
 

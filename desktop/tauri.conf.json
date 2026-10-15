@@ -1,0 +1,23 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "DupeLens",
+  "version": "0.1.0",
+  "identifier": "org.dupelens.app",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      { "title": "DupeLens", "width": 1280, "height": 860, "minWidth": 420, "minHeight": 500 }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data: thumb: http://thumb.localhost; style-src 'self'; script-src 'self'; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/icon.ico", "icons/icon.png"]
+  }
+}
