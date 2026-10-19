@@ -63,6 +63,12 @@ dupelens/
 └── docs/DEVELOPMENT.md   setup, design decisions, open questions
 ```
 
+## Download
+
+Get the latest installer from the [Releases page](https://github.com/TanmaySubhedar/dupelens/releases/latest):
+Windows (`.exe` setup or `.msi`) or Linux (`.deb`, `.rpm`, `.AppImage`). The app is not
+code-signed yet, so Windows SmartScreen may warn you: choose **More info**, then **Run anyway**.
+
 ## Try it
 
 ```bash

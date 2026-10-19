@@ -1,0 +1,67 @@
+# Builds the DupeLens desktop installers for Windows and Linux and attaches them to a draft
+# GitHub Release. Start it by pushing a version tag:  git tag v0.1.0 && git push --tags
+# (macOS is left out for now; it needs an Apple developer account to install without warnings.)
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: # manual run from the Actions tab, to test the build without tagging
+
+permissions:
+  contents: write # lets the job create the release and upload files to it
+
+jobs:
+  check-version:
+    # Stops a release whose tag doesn't match the version inside the app.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag must match tauri.conf.json and desktop/Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          conf=$(jq -r .version desktop/tauri.conf.json)
+          crate=$(grep -m1 '^version' desktop/Cargo.toml | cut -d'"' -f2)
+          echo "tag=$tag tauri.conf.json=$conf Cargo.toml=$crate"
+          [ "$tag" = "$conf" ] && [ "$tag" = "$crate" ] || { echo "Version mismatch"; exit 1; }
+
+  build:
+    needs: check-version
+    strategy:
+      fail-fast: false # if one operating system fails, the other still finishes
+      matrix:
+        os: [windows-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system libraries (the window and its web engine)
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf libssl-dev libgtk-3-dev
+
+      - name: Reuse compiled dependencies between runs
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+
+      - name: Install the Tauri command-line tool
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli@2
+
+      - name: Build installers and publish them to the draft release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: desktop
+          tauriScript: cargo tauri
+          tagName: ${{ github.ref_name }}
+          releaseName: "DupeLens ${{ github.ref_name }}"
+          releaseBody: "Download the installer for your system below. Windows: the .exe (setup) or .msi. Linux: .deb, .rpm or .AppImage. The app is not code-signed yet, so Windows may show a SmartScreen warning: choose More info, then Run anyway."
+          releaseDraft: true
+          prerelease: false

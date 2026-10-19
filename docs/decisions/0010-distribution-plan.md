@@ -25,3 +25,15 @@ Audience: the public (open source). Android isn't covered by this plan.
 - No git remote exists yet. Decide which GitHub account and org hosts the public repo.
 - Third-party license notices must ship with releases (dependencies are MIT/Apache;
   SQLite is public domain).
+
+## Update 2026-10-19
+- The app is now the Tauri desktop app (0012), which has its own bundler, so the release
+  workflow uses `tauri-apps/tauri-action` (`.github/workflows/release.yml`), not `dist`.
+  `dist` would only suit the standalone CLI.
+- **Phase 1 targets Windows (`.exe` setup + `.msi`) and Linux (`.deb`, `.rpm`, `.AppImage`)
+  only.** macOS is deferred (needs a paid Apple Developer ID to avoid Gatekeeper blocks).
+- Release flow: bump the version in `desktop/tauri.conf.json` and `desktop/Cargo.toml`, push a
+  `vX.Y.Z` tag, review the draft release, publish. The workflow fails if the tag and versions differ.
+- Package managers (winget, Scoop) come after the first release; they only point at these files.
+- Cost: free for a public repo. A private repo draws on the account-wide monthly minutes.
+
