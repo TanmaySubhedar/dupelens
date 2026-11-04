@@ -22,6 +22,9 @@ Last updated: 2026-10-07. Decisions behind this plan are in [decisions/](decisio
      CONTRIBUTING, CODE_OF_CONDUCT, SECURITY.md, issue templates.
    - CI on Windows/Linux/macOS; releases via `dist`; winget + Homebrew ([0010](decisions/0010-distribution-plan.md)).
 2. **v0.2: Phase 2 file types:** videos, PDFs, Office files, ZIPs, audio, code (exact matching), same flow.
+   Engine side ✅ done 2026-11-04 ([0013](decisions/0013-exact-matching-for-every-file-type.md)).
+   Still to do for v0.2: tunable matching settings with re-run, the redesigned UI and new logo
+   ([UI.md](UI.md#visual-design-v02-direction)), undo and history. Watch mode and HEIC are v0.3.
 3. **v0.3: Tauri desktop app** showing the v0.1 UI (`desktop/` already exists and is the main program); installers.
 4. **Later: Android** via Tauri 2 (see blockers below). **Phase 3** AI similarity (CLIP/SigLIP/DINOv2).
 

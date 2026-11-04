@@ -26,6 +26,7 @@ are without reading the code or old chats.
 | [0010](0010-distribution-plan.md) | Distribution: GitHub Releases via CI, package managers, signing | Proposed | 2026-10-06 |
 | [0011](0011-one-ui-two-hosts.md) | One UI, two hosts: the browser UI runs unchanged in Tauri | Accepted (browser host removed 2026-10-10) | 2026-10-07 |
 | [0012](0012-tauri-app-is-primary.md) | The Tauri app is the main program; the browser UI becomes a fallback | Accepted | 2026-10-10 |
+| [0013](0013-exact-matching-for-every-file-type.md) | Exact matching for every file type, reading as little as possible | Accepted | 2026-11-04 |
 
 See also: [ROADMAP](../ROADMAP.md) for what's next and open questions, and
 [PRD-v1](../PRD-v1.md) for the original product requirements.

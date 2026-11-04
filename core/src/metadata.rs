@@ -80,6 +80,22 @@ pub fn analyze(path: &Path, size: u64) -> std::io::Result<Analysis> {
     Ok(analysis)
 }
 
+/// The analysis of a file that is not a photo: its SHA-256 only, read as a stream so a
+/// multi-gigabyte video never has to fit in memory.
+pub fn analyze_plain(path: &Path) -> std::io::Result<Analysis> {
+    Ok(Analysis {
+        sha256: hashing::sha256_reader(File::open(path)?)?,
+        exif: ExifInfo {
+            orientation: 1,
+            ..Default::default()
+        },
+        width: None,
+        height: None,
+        hashes: None,
+        sharpness: None,
+    })
+}
+
 /// Decodes a file into upright grayscale pixels for [`hashing::local_difference`], shrunk with
 /// a smooth filter so its *shorter* side is at most [`PRESHRINK_MIN_SIDE`]. The comparison
 /// never uses more detail than that, so the rest of the check works on small images instead of

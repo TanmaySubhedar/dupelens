@@ -7,12 +7,35 @@
 //! 4. Richest EXIF metadata (tag count)
 //! 5. Earliest original creation timestamp (EXIF)
 //! 6. Favourite flag
+//! 7. A file name that does not look like a copy (`report (1).pdf`, `Copy of report.pdf`)
 //!
-//! If everything ties (typical for byte-identical copies), the oldest file on disk wins,
-//! then the shortest path, so the result is deterministic.
+//! If everything ties (typical for byte-identical copies, and the usual case for files that are
+//! not photos), the oldest file on disk wins, then the shortest path, so the result is
+//! deterministic.
 
 use crate::model::FileRecord;
 use std::cmp::Ordering;
+
+/// True for names that browsers and file managers give to extra copies: `report (1).pdf`,
+/// `report - Copy.pdf`, `Copy of report.pdf`, `report_copy.pdf`.
+fn looks_like_copy(f: &FileRecord) -> bool {
+    let Some(stem) = f.path.file_stem().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    let lower = stem.to_lowercase();
+    let numbered = lower.ends_with(')')
+        && lower.rfind(" (").is_some_and(|i| {
+            lower[i + 2..lower.len() - 1]
+                .chars()
+                .all(|c| c.is_ascii_digit())
+                && lower.len() - 1 > i + 2
+        });
+    numbered
+        || lower.starts_with("copy of ")
+        || lower.ends_with(" - copy")
+        || lower.ends_with("_copy")
+        || lower.contains(" - copy (")
+}
 
 /// Sharpness within the same bucket (about 19% apart) counts as equal quality.
 /// Bucketing (rather than "within X%") keeps the comparison transitive.
@@ -30,13 +53,14 @@ enum Criterion {
     Metadata,
     CreationDate,
     Favorite,
+    Name,
     Tiebreak,
 }
 
 /// `Greater` means `a` is the better copy to keep.
 fn compare(a: &FileRecord, b: &FileRecord) -> (Ordering, Criterion) {
     use Criterion::*;
-    let steps: [(Ordering, Criterion); 6] = [
+    let steps: [(Ordering, Criterion); 7] = [
         (a.pixels().cmp(&b.pixels()), Resolution),
         (a.longest_side().cmp(&b.longest_side()), Dimensions),
         (quality_bucket(a).cmp(&quality_bucket(b)), Quality),
@@ -52,6 +76,8 @@ fn compare(a: &FileRecord, b: &FileRecord) -> (Ordering, Criterion) {
             CreationDate,
         ),
         (a.favorite.cmp(&b.favorite), Favorite),
+        // A name that does not look like a copy beats one that does.
+        (looks_like_copy(b).cmp(&looks_like_copy(a)), Name),
     ];
     for (ord, crit) in steps {
         if ord != Ordering::Equal {
@@ -82,7 +108,17 @@ pub fn recommend(files: &[FileRecord]) -> (usize, String) {
         .max_by(|&i, &j| compare(&files[i], &files[j]).0);
     let crit = match runner_up {
         Some(r) => compare(&files[best], &files[r]).1,
-        None => Criterion::Tiebreak,
+        None => {
+            // All copies are byte-identical, so only the file name can tell them apart (apart
+            // from age). Say so when it did.
+            let rival = (0..files.len())
+                .filter(|&i| i != best)
+                .max_by(|&i, &j| compare(&files[i], &files[j]).0);
+            match rival.map(|r| compare(&files[best], &files[r]).1) {
+                Some(Criterion::Name) => Criterion::Name,
+                _ => Criterion::Tiebreak,
+            }
+        }
     };
     (best, reason(&files[best], crit, files))
 }
@@ -101,6 +137,7 @@ fn reason(f: &FileRecord, crit: Criterion, all: &[FileRecord]) -> String {
             f.taken_at.as_deref().unwrap_or("unknown date")
         ),
         Criterion::Favorite => "Marked as a favourite".into(),
+        Criterion::Name => "Original file name (the others look like copies)".into(),
         Criterion::Tiebreak => {
             if all.iter().all(|x| x.sha256 == f.sha256) {
                 "All copies are identical; keeping the oldest file".into()
@@ -190,6 +227,45 @@ mod tests {
         let mut fav = rec(2);
         fav.favorite = true;
         assert_eq!(recommend(&[rec(1), fav]).0, 1);
+    }
+
+    #[test]
+    fn copy_like_names_are_recognised() {
+        let named = |n: &str| FileRecord {
+            path: format!("/p/{n}").into(),
+            ..rec(1)
+        };
+        for copy in [
+            "report (1).pdf",
+            "report (12).pdf",
+            "Copy of report.pdf",
+            "report - Copy.pdf",
+            "report - Copy (2).pdf",
+            "report_copy.pdf",
+        ] {
+            assert!(looks_like_copy(&named(copy)), "{copy}");
+        }
+        for original in [
+            "report.pdf",
+            "report (final).pdf",
+            "report ().pdf",
+            "copying.pdf",
+        ] {
+            assert!(!looks_like_copy(&named(original)), "{original}");
+        }
+    }
+
+    #[test]
+    fn an_original_name_beats_a_copy_even_when_the_copy_is_older() {
+        let same = |id: i64, name: &str, mtime: i64| FileRecord {
+            path: format!("/p/{name}").into(),
+            sha256: "same".into(),
+            mtime_ns: mtime,
+            ..rec(id)
+        };
+        let (i, why) = recommend(&[same(1, "budget (1).xlsx", 10), same(2, "budget.xlsx", 20)]);
+        assert_eq!(i, 1);
+        assert!(why.contains("Original file name"), "{why}");
     }
 
     #[test]

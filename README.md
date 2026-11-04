@@ -4,7 +4,9 @@ A privacy-first, offline duplicate photo finder for your desktop, in the spirit 
 duplicate cleaner in Files by Google: it recommends the best copy to keep, pre-selects the
 rest, and cleans up when you confirm. Nothing is ever uploaded.
 
-**Current scope: Phase 1 (images).**
+**Current scope: photos get look-alike matching; every other file type (videos, music, documents,
+archives, anything) gets exact-copy matching** ([why](docs/decisions/0013-exact-matching-for-every-file-type.md)).
+The pages still say "photos" in places while the interface is redesigned ([docs/UI.md](docs/UI.md)).
 
 ## What it promises
 
@@ -43,7 +45,7 @@ rest, and cleans up when you confirm. Nothing is ever uploaded.
 ```
 dupelens/
 ├── core/                 Rust engine (Cargo package `dupelens-core`)
-│   ├── src/scanner.rs    walks ONLY the selected folders, finds image files
+│   ├── src/scanner.rs    walks ONLY the selected folders, lists every file (skips system and cloud-only)
 │   ├── src/metadata.rs   reads each file once: SHA-256, EXIF, dimensions, hashes
 │   ├── src/hashing.rs    SHA-256 + aHash / dHash / pHash + sharpness
 │   ├── src/grouping.rs   exact + near-duplicate grouping (BK-tree, union-find)

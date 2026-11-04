@@ -105,7 +105,7 @@ function renderFolders() {
 
   mount(main,
     h('section', { class: 'card narrow' },
-      h('h1', {}, 'Find duplicate photos'),
+      h('h1', {}, 'Find duplicate files'),
       h('p', { class: 'lead' }, 'Choose the folders to look in. DupeLens only reads these folders, works entirely offline, and never deletes anything until you confirm.'),
       h('div', { class: 'folder-actions' },
         h('button', { class: 'primary', onclick: (e) => busy(e.currentTarget, chooseFolder) }, '+ Choose folder…'),
@@ -146,8 +146,8 @@ async function removeFolder(path) {
 // ---------- screen: scanning ----------
 
 const PHASES = {
-  discovering: 'Looking for photos…',
-  analyzing: 'Analysing photos',
+  discovering: 'Looking for files…',
+  analyzing: 'Reading files',
   saving: 'Saving results…',
   comparing: 'Comparing look-alike photos…',
 };
@@ -163,7 +163,7 @@ function showScan() {
   const count = h('p', { class: 'muted count' }, '');
   mount(main, h('section', { class: 'card narrow center' },
     h('h1', {}, 'Scanning'), label, bar, count,
-    h('p', { class: 'muted small' }, 'Photos that haven’t changed since the last scan are skipped, so rescans are quick.'),
+    h('p', { class: 'muted small' }, 'Files that haven’t changed since the last scan are skipped, so rescans are quick.'),
   ));
 
   const tick = async () => {
@@ -226,7 +226,7 @@ function showResults() {
 function summaryLine() {
   const s = state.lastSummary;
   if (!s) return null;
-  const parts = [`${plural(s.files_found, 'photo')} scanned`];
+  const parts = [`${plural(s.files_found, 'file')} scanned`];
   if (s.files_unchanged) parts.push(`${s.files_unchanged.toLocaleString()} unchanged since last time`);
   if (s.unreadable_count) parts.push(`${plural(s.unreadable_count, 'file')} couldn’t be read`);
   return h('p', { class: 'muted' }, `${parts.join(' · ')}.`, s.missing_folders.map((f) => h('span', { class: 'warn' }, ` Folder not found (skipped): ${f}.`)));
@@ -237,7 +237,7 @@ function summaryBanner() {
   return h('section', { class: 'banner' },
     h('div', {},
       h('h1', {}, `${plural(state.groups.length, 'group')} of duplicates`),
-      h('p', { class: 'lead' }, `Up to ${formatBytes(reclaim)} can be freed. The 👑 photo in each group is the one we suggest keeping; click any photo to switch it between keep and delete.`),
+      h('p', { class: 'lead' }, `Up to ${formatBytes(reclaim)} can be freed. The 👑 file in each group is the one we suggest keeping; click any file to switch it between keep and delete.`),
       summaryLine()),
     h('button', { class: 'secondary', onclick: showFolders }, 'Folders & rescan'),
   );
@@ -264,7 +264,7 @@ function renderActionBar() {
   const scope = state.filter === 'all' ? '' : ' (shown groups)';
   mount(bar,
     h('div', { class: 'tally' },
-      h('strong', {}, plural(marked.length, 'photo')), ' marked for deletion · ',
+      h('strong', {}, plural(marked.length, 'file')), ' marked for deletion · ',
       h('strong', {}, formatBytes(state.selection.markedBytes()))),
     h('div', { class: 'bar-buttons' },
       h('button', { class: 'secondary', onclick: () => { state.selection.keepRecommended(visibleGroups()); refreshAll(); } }, `Keep recommended${scope}`),
@@ -307,7 +307,7 @@ function fillGroupCard(card, group) {
     h('header', {},
       h('div', {},
         h('span', { class: `pill ${group.kind}` }, kind),
-        h('span', { class: 'group-title' }, ` ${plural(group.members.length, 'photo')} · deleting ${marked.size} frees ${formatBytes(freed)}`),
+        h('span', { class: 'group-title' }, ` ${plural(group.members.length, 'file')} · deleting ${marked.size} frees ${formatBytes(freed)}`),
         h('p', { class: 'reason' }, `👑 ${group.reason}`)),
       h('div', { class: 'group-buttons' },
         h('button', { class: 'link', onclick: () => { state.selection.restore(group); updateGroup(card, group); } }, 'Restore'),
@@ -336,7 +336,7 @@ function tile(card, group, file, isMarked) {
   return h('div', { class: `tile ${isMarked ? 'marked' : 'kept'}`, dataset: { file: file.id } },
     h('button', {
       class: 'tile-main', onclick: toggle, 'aria-pressed': String(isMarked),
-      title: `${file.path}\nClick to ${isMarked ? 'keep' : 'delete'} this photo`,
+      title: `${file.path}\nClick to ${isMarked ? 'keep' : 'delete'} this file`,
     },
     h('div', { class: 'frame' },
       photo(file),
@@ -384,8 +384,8 @@ function showReview() {
     confirmRow.hidden = mode !== 'permanent';
     go.disabled = mode === 'permanent' && !confirmBox.checked;
     go.textContent = mode === 'trash'
-      ? `Move ${plural(marked.length, 'photo')} to the ${trashName()}`
-      : `Permanently delete ${plural(marked.length, 'photo')}`;
+      ? `Move ${plural(marked.length, 'file')} to the ${trashName()}`
+      : `Permanently delete ${plural(marked.length, 'file')}`;
   };
   confirmBox.addEventListener('change', sync);
   const option = (value, title, text, disabled = false) => h('label', { class: `option ${disabled ? 'disabled' : ''}` },
@@ -400,7 +400,7 @@ function showReview() {
 
   mount(main, h('section', { class: 'card review' },
     h('h1', {}, 'Review before deleting'),
-    h('p', { class: 'lead' }, `${plural(marked.length, 'photo')} from ${plural(byGroup.size, 'group')} will be removed, freeing ${formatBytes(bytes)}. In every group at least one copy stays.`),
+    h('p', { class: 'lead' }, `${plural(marked.length, 'file')} from ${plural(byGroup.size, 'group')} will be removed, freeing ${formatBytes(bytes)}. In every group at least one copy stays.`),
     h('div', { class: 'options' },
       option('trash', `Move to the ${trashName()} (recommended)`, 'You can restore them from there if you change your mind.', !trash),
       option('permanent', 'Delete permanently', 'Frees the space immediately. This cannot be undone.')),
@@ -433,10 +433,10 @@ function showDone(report, permanent) {
   const where = permanent ? 'deleted permanently' : `moved to the ${trashName()}`;
   mount(main, h('section', { class: 'card narrow center' },
     h('div', { class: 'big-emoji', 'aria-hidden': 'true' }, report.failed.length ? '⚠️' : '✅'),
-    h('h1', {}, `${plural(report.deleted.length, 'photo')} ${where}`),
+    h('h1', {}, `${plural(report.deleted.length, 'file')} ${where}`),
     h('p', { class: 'lead' }, `${formatBytes(report.bytes_freed)} freed.`),
     report.failed.length > 0 && h('div', { class: 'failures' },
-      h('p', {}, `${plural(report.failed.length, 'photo was', 'photos were')} skipped and left untouched:`),
+      h('p', {}, `${plural(report.failed.length, 'file was', 'files were')} skipped and left untouched:`),
       h('ul', {}, report.failed.map((f) => h('li', {}, h('span', { class: 'name' }, f.path || `File ${f.id}`), ` — ${f.reason}`)))),
     h('div', { class: 'review-buttons' },
       state.groups.length > 0 && h('button', { class: 'primary', onclick: showResults }, `Continue with ${plural(state.groups.length, 'remaining group')}`),
