@@ -295,3 +295,9 @@ kbd { font: .72rem var(--mono); border: 1px solid var(--border); border-radius: 
   .tile { width: calc(50% - .3rem); }
   .toolbar { top: 48px; }
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .bar .fill { transition: none; }
+  .bar.indeterminate .fill { animation: none; width: 100%; opacity: .4; }
+  .toast { transition: none; }
+}

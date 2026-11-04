@@ -111,9 +111,13 @@ function renderNav() {
 }
 
 function enter(screen) {
+  const changed = state.screen !== screen;
   state.screen = screen;
   renderNav();
-  window.scrollTo(0, 0);
+  if (changed) {
+    window.scrollTo(0, 0);
+    main.focus({ preventScroll: true });
+  }
 }
 
 // ---------- screen: overview ----------
@@ -221,7 +225,11 @@ function matchingPanel() {
       h('label', { class: 'preset' },
         h('input', {
           type: 'radio', name: 'preset', value: p.key, checked: chosen === p.key,
-          onchange: () => { state.pendingPreset = p.key === st.preset ? null : p.key; renderOverview(); },
+          onchange: () => {
+            state.pendingPreset = p.key === st.preset ? null : p.key;
+            renderOverview();
+            document.querySelector(`input[name="preset"][value="${p.key}"]`)?.focus();
+          },
         }),
         h('span', {}, h('strong', {}, p.name), h('span', { class: 'muted' }, p.description))))),
     changed && h('p', { class: 'pending-note' }, hasResults ? 'Re-run to update your results. Folders are not read again.' : 'Applies to your next scan.'),
@@ -294,7 +302,7 @@ async function startRegroup() {
 function showScan({ steps = STEPS, title = 'Scanning', note = 'Files that haven’t changed since the last scan are skipped, so rescans are quick.' } = {}) {
   enter('scan');
   const percent = h('div', { class: 'percent num' }, '…');
-  const bar = h('div', { class: 'bar indeterminate' }, h('div', { class: 'fill' }));
+  const bar = h('div', { class: 'bar indeterminate', role: 'progressbar', 'aria-label': title, 'aria-valuemin': '0', 'aria-valuemax': '100' }, h('div', { class: 'fill' }));
   const counts = h('p', { class: 'counts' }, '');
   const list = h('ol', { class: 'steps' }, steps.map(([, label]) => h('li', {}, label)));
   const cancelButton = h('button', { onclick: (e) => busy(e.currentTarget, () => call('cancel')) }, 'Cancel');
@@ -322,6 +330,8 @@ function showScan({ steps = STEPS, title = 'Scanning', note = 'Files that haven�
       bar.classList.toggle('indeterminate', !known);
       bar.firstChild.style.setProperty('width', known ? `${Math.min(100, 100 * fraction)}%` : '');
       percent.textContent = known ? `${Math.min(100, Math.floor(100 * fraction))}%` : '…';
+      if (known) bar.setAttribute('aria-valuenow', String(Math.min(100, Math.floor(100 * fraction))));
+      else bar.removeAttribute('aria-valuenow');
       counts.textContent = byBytes
         ? `${formatBytes(status.bytes_done)} of ${formatBytes(status.bytes_total)} · ${status.done.toLocaleString()} of ${status.total.toLocaleString()} files`
         : byCount ? `${status.done.toLocaleString()} of ${status.total.toLocaleString()} pairs` : '';
@@ -337,7 +347,13 @@ function showScan({ steps = STEPS, title = 'Scanning', note = 'Files that haven�
       return showOverview();
     }
     state.lastSummary = status.state === 'done' ? status.summary : null;
-    await loadGroups();
+    try {
+      await loadGroups();
+    } catch (e) {
+      forgetResults();
+      showError(e);
+      return showOverview();
+    }
     state.filter = 'all';
     state.kind = 'all';
     if (state.groups.length === 0) return showOverview();
@@ -373,7 +389,8 @@ function showResults() {
       h('button', { onclick: showOverview }, 'Back to overview')));
     return;
   }
-  if (!state.active || !findActive()) setDefaultActive();
+  if (state.filter !== 'all' && !state.groups.some((g) => g.category === state.filter)) state.filter = 'all';
+  if (!findActive()) setDefaultActive();
   const bar = h('div', { class: 'toolbar', id: 'toolbar' });
   mount(main, bar,
     h('div', { class: 'results' },
@@ -384,15 +401,16 @@ function showResults() {
   renderPane();
 }
 
+/** The active copy, only if its group is one the list is showing right now. */
 function findActive() {
   const { gid, fid } = state.active ?? {};
-  const group = state.groups.find((g) => g.id === gid);
+  const group = shownGroups().find((g) => g.id === gid);
   const file = group?.members.find((m) => m.id === fid);
   return group && file ? { group, file } : null;
 }
 
 function setDefaultActive() {
-  const g = visibleGroups()[0] ?? state.groups[0];
+  const g = shownGroups()[0];
   state.active = g ? { gid: g.id, fid: g.recommended_id } : null;
 }
 
@@ -404,11 +422,12 @@ function renderToolbar() {
   for (const g of state.groups) counts.set(g.category, (counts.get(g.category) ?? 0) + 1);
   const chip = (key, label, n) => h('button', {
     class: state.filter === key ? 'chip active' : 'chip', 'aria-pressed': String(state.filter === key),
-    onclick: () => { state.filter = key; state.shown = GROUPS_PER_PAGE; showResults(); },
+    dataset: { chip: key },
+    onclick: () => { state.filter = key; state.shown = GROUPS_PER_PAGE; showResults(); document.querySelector(`[data-chip="${key}"]`)?.focus(); },
   }, label, h('span', { class: 'num' }, n.toLocaleString()));
   const kind = h('select', {
     'aria-label': 'Kind of match',
-    onchange: (e) => { state.kind = e.currentTarget.value; state.shown = GROUPS_PER_PAGE; showResults(); },
+    onchange: (e) => { state.kind = e.currentTarget.value; state.shown = GROUPS_PER_PAGE; showResults(); document.querySelector('.toolbar select')?.focus(); },
   }, [['all', 'All matches'], ['exact', 'Exact copies'], ['near', 'Look-alikes'], ['maybe', 'Maybe']]
     .map(([v, label]) => h('option', { value: v, selected: state.kind === v }, label)));
   const scope = state.filter === 'all' && state.kind === 'all' ? '' : ' (shown)';
@@ -476,9 +495,15 @@ function fillGroupCard(card, group) {
 }
 
 function updateGroup(card, group) {
+  // Redrawing replaces the buttons, so note which one had focus and put focus back on its twin.
+  const was = document.activeElement;
+  const tileId = was?.closest?.('.tile')?.dataset.file;
+  const headerText = was?.closest?.('.group-buttons') ? was.textContent : null;
   fillGroupCard(card, group);
   renderToolbar();
   renderPane();
+  if (tileId) card.querySelector(`.tile[data-file="${tileId}"] .tile-main`)?.focus({ preventScroll: true });
+  else if (headerText) [...card.querySelectorAll('.group-buttons button')].find((b) => b.textContent === headerText)?.focus({ preventScroll: true });
 }
 
 function tile(card, group, file, isMarked) {
@@ -535,6 +560,7 @@ function renderPane() {
   }
   const { group, file } = found;
   const isMarked = state.selection.isMarked(group, file.id);
+  const hadFocus = pane.contains(document.activeElement) ? document.activeElement.textContent : null;
   mount(pane,
     h('div', { class: 'pane-image' }, preview(file, { large: true, cls: 'large' })),
     h('div', { class: 'pane-body' },
@@ -547,6 +573,7 @@ function renderPane() {
       h('p', { class: 'keys' },
         h('kbd', {}, 'Space'), ' full size  ', h('kbd', {}, '←'), h('kbd', {}, '→'), ' move  ',
         h('kbd', {}, 'K'), ' keep  ', h('kbd', {}, 'D'), ' delete')));
+  if (hadFocus) [...pane.querySelectorAll('.row button')].find((b) => b.textContent === hadFocus)?.focus({ preventScroll: true });
 }
 
 function factRows(group, file) {
@@ -605,6 +632,7 @@ function onKeys(e) {
     const g = groups[gi];
     if (g) move(flat.findIndex((x) => x.group.id === g.id));
   };
+  if (e.key === ' ' && spaceBelongsToButton(t)) return;
   switch (e.key) {
     case 'ArrowRight': move(at + 1); break;
     case 'ArrowLeft': move(at - 1); break;
@@ -617,10 +645,14 @@ function onKeys(e) {
   }
   e.preventDefault();
 }
+/** A focused button (other than a photo tile) keeps its own Space behaviour. */
+function spaceBelongsToButton(t) {
+  return t instanceof HTMLElement && !!t.closest('button') && !t.closest('.tile-main');
+}
 document.addEventListener('keydown', onKeys);
 // A button also activates on Space's key-up; stop that so Space only opens the viewer.
 document.addEventListener('keyup', (e) => {
-  if (e.key === ' ' && state.screen === 'results' && !(e.target instanceof HTMLElement && e.target.matches('input, select, textarea'))) e.preventDefault();
+  if (e.key === ' ' && state.screen === 'results' && !(e.target instanceof HTMLElement && e.target.matches('input, select, textarea')) && !spaceBelongsToButton(e.target)) e.preventDefault();
 });
 
 // ---------- screen: review ----------
@@ -689,11 +721,16 @@ function trashName() {
 async function doDelete(marked, permanent) {
   const byFile = new Map(marked.map(({ file }) => [file.id, file]));
   const report = await call('delete', { ids: [...byFile.keys()], permanent });
-  const freedByType = byCategory(report.deleted.map((id) => {
+  const freedByType = byCategory(report.deleted.filter((id) => byFile.has(id)).map((id) => {
     const f = byFile.get(id);
     return { category: f.category, members: [f], reclaimable_bytes: f.size };
   }));
-  await loadGroups({ keepPrevious: true });
+  try {
+    await loadGroups({ keepPrevious: true });
+  } catch (e) {
+    forgetResults();
+    showError(e);
+  }
   const stats = await call('stats').catch(() => null);
   showDone(report, permanent, stats, freedByType);
 }
@@ -703,7 +740,13 @@ async function undoLast(batch) {
   const r = await call('undo', { batch });
   const failed = r.failed.length ? ` ${plural(r.failed.length, 'file')} could not be restored: ${r.failed[0].reason}.` : '';
   toast(`Restored ${plural(r.restored, 'file')}.${failed}`, r.failed.length ? 'warn' : 'info');
-  await startScan();
+  try {
+    await startScan();
+  } catch (e) {
+    showError(e);
+    forgetResults();
+    await showOverview();
+  }
 }
 
 // ---------- screen: done ----------
