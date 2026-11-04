@@ -49,7 +49,7 @@ scan could not be stopped.
 - **Regrouping on every scan only.** It would make trying a setting cost a full scan.
 
 ## Known gaps
-- The Custom values have no screen in the old pages yet; the redesign (docs/UI.md) adds it.
+- The Custom values have a screen (Settings) with range checks; it shows the engine's limits as numbers, with no live preview of what a change would find.
 - The "not a duplicate" list is not built.
 - Hard-link detection holds one open file handle per file that shares a size, at the same time.
   On Linux and macOS with very many same-size files it can hit the open-file limit and then

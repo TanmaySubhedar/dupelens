@@ -106,9 +106,10 @@ Requirements for it: `app.withGlobalTauri: true` (the page uses
 
 ## Visual design (v0.2 direction)
 
-Status: **agreed direction, not yet built.** The current pages in `ui/` still use the old look
-(blue accent, rounded cards, emoji). The mock-ups this section was drawn from are not kept in
-the repository; this page and the logo files are the reference.
+Status: **built** (v0.2): the pages in `ui/` use this design in light and dark, with the fonts
+bundled in `ui/fonts/`. What is not built yet is listed at the end of this section. The
+mock-ups this section was drawn from are not kept in the repository; this page and the logo
+files are the reference.
 
 ### Principles
 
@@ -165,7 +166,7 @@ A top bar with the logo and a plain text navigation (Overview, Results, Settings
 | **Results** | File-type filter chips with counts, the selection total and **Review and delete** in a toolbar. Left: groups, each with a row of thumbnails of all copies tagged Keep or Delete. Right (372 px): the large preview of the copy being pointed at, its facts, and Keep/Delete buttons |
 | **Review and delete** | Every file to be removed beside the copy that stays, the total, Recycle Bin (default) or permanent delete, a notice when videos or archives are included, and the three safety promises |
 | **Done** | Space freed, a breakdown by type, **Undo** and **Continue reviewing**, and a quiet panel with the lifetime total and the next milestone, stored only on this computer |
-| **Settings** | Not yet designed. Holds the advanced matching values |
+| **Settings** | The four advanced matching values (Custom), each with a one-line explanation and its allowed range, "Start from" buttons that fill them from a preset, the smallest file size to include, and a short About |
 
 Group thumbnails: photos use the engine's thumbnails. For videos, PDFs and Office files, use the
 operating system's thumbnail service where it exists (Windows); otherwise show a file-type tile
@@ -195,10 +196,21 @@ thing twice. Files are in [`design/logo/`](design/logo/):
 | `dupelens-mark-small-light.svg` | 16 to 24 px on light backgrounds: heavier lines and a larger overlap |
 | `dupelens-mark-small-dark.svg` | 16 to 24 px on dark backgrounds |
 
-These are drawn but **not yet wired in**: `ui/icon.svg` and the app icons in `desktop/icons/`
-still hold the old mark. Replacing them means regenerating `icon.ico` and the PNG sizes (and
-an `.icns` for a future macOS build) from the small variant at the small sizes. Check the 16 px
-render before shipping.
+The mark is wired in: the top bar uses the small variants (swapped by the system theme),
+`ui/icon.svg` is the browser/tab icon (it switches colours itself), and the app icon
+(`desktop/icons/icon.ico`, 16 to 256 px, and `icon.png`, 512 px) is drawn from
+[`dupelens-app-icon.svg`](design/logo/dupelens-app-icon.svg): the mark on a dark rounded tile,
+so it shows on light and dark taskbars. It was checked at 16 px in both themes. An `.icns` for a
+future macOS build is not made yet.
+
+### What is not built yet
+
+- **Scanning:** the "file being read" line and the **Found so far** panel need the engine to
+  report them while a scan runs.
+- **Thumbnails for videos, PDFs and Office files** from the operating system's thumbnail
+  service. They show a file-type tile with the extension for now.
+- A "not a duplicate" list, and a video duration on video tiles.
+- Contrast was checked by eye in both themes, not with a tool.
 
 ### Planned engine and command changes this design needs
 
@@ -210,10 +222,10 @@ These are not in the contract above yet. Each needs a decision record when built
   them yet. Progress in bytes, scan cancellation and hard-link detection are done too.
 - ~~Matching settings stored in the database, with commands to read and change them and to
   regroup from cached results (with progress and cancel)~~ Done
-  ([0014](decisions/0014-tunable-matching.md)); the old pages have a basic preset menu, the
-  redesign adds the full control and the Advanced values.
+  ([0014](decisions/0014-tunable-matching.md)); the Overview has the presets with **Re-run**,
+  and Settings has the Advanced values.
 - A "not a duplicate" list.
 - ~~Deletion history and undo for the Recycle Bin, and a local lifetime total~~ Done in the engine
-  and commands ([0015](decisions/0015-deletion-history-and-undo.md)); the old pages have an Undo
-  button and a "freed so far" line, and first-run folder suggestions. The milestone bar and the
-  "found so far" panel during a scan are still to do with the redesign.
+  and commands ([0015](decisions/0015-deletion-history-and-undo.md)); the pages have Undo, the
+  lifetime total with a milestone bar, and first-run folder suggestions. The "found so far"
+  panel during a scan is still to do.
