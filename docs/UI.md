@@ -34,7 +34,11 @@ refused deletion). `message` is plain language, ready to show.
 | `add_folder` | `{ path }` | the stored (canonical) path |
 | `remove_folder` | `{ path }` | `true` if it was selected |
 | `start_scan` | – | `null`; the scan runs in the background |
-| `scan_status` | – | `{ state: "idle" }`, `{ state: "running", phase, done, total }`, `{ state: "done", summary }` or `{ state: "failed", error }` |
+| `start_regroup` | – | `null`; re-groups the last scan's results with the current matching setting in the background, without reading any folder. Poll `scan_status` |
+| `cancel` | – | `true` if a scan or regroup was running and was asked to stop |
+| `scan_status` | – | `{ state: "idle" }`, `{ state: "running", phase, done, total, bytes_done, bytes_total }`, `{ state: "done", summary }`, `{ state: "failed", error }` or `{ state: "cancelled" }` |
+| `get_settings` | – | `{ preset, config, min_size, presets: [{ key, name, description, config }] }` |
+| `set_settings` | `{ preset?, custom?, min_size? }` | the new settings. Drops the cached results: call `start_regroup` after a matching change; a changed `min_size` needs a new scan |
 | `groups` | – | duplicate groups from the last scan (cached) |
 | `delete` | `{ ids, permanent }` | `{ deleted, failed: [{ id, path, reason }], bytes_freed }` |
 | `pick_folder` * | – | a path, or `null` if cancelled or no dialog is available |
@@ -43,7 +47,19 @@ refused deletion). `message` is plain language, ready to show.
 \* **Host commands.** The app implements these itself in `desktop/src/main.rs`, because they
 need its own windowing (`quit` closes the window). Everything else is forwarded to
 `Service::call`. `phase` is one of `discovering`,
-`analyzing` (with `done`/`total`), `saving` or `comparing`.
+`analyzing` (`done`/`total` files, and `bytes_done`/`bytes_total` so a single huge file still
+moves the bar), `saving` or `comparing` (`done`/`total` look-alike pairs). A cancelled job
+loses nothing: files already read are kept for the next scan.
+
+Each group carries `category`, `kind` (`exact` or `near`) and `tentative` (found only because
+matching is set looser than Balanced: the page must not pre-select it for deletion); each file
+carries `category` and `modified_secs`. The scan summary carries `files_without_twin`,
+`bytes_read`, `cloud_only_skipped` and `hard_links_skipped`.
+
+Matching `preset` is one of `exact_only`, `strict`, `balanced`, `loose` or `custom`
+([0014](decisions/0014-tunable-matching.md)). For `custom`, send
+`custom: { phash_max, dhash_max, aspect_tolerance, max_local_difference }`; out-of-range values
+are refused with `kind: "failed"`.
 
 Previews: JPEG, longest side 360 px (`size=small`) or 1600 px (`size=large`). Only files in
 the current results can be previewed, so the page can never read an arbitrary path. Formats
@@ -188,8 +204,10 @@ These are not in the contract above yet. Each needs a decision record when built
 - ~~Exact matching for every file type~~ Done in the engine ([0013](decisions/0013-exact-matching-for-every-file-type.md)).
   `groups` results now carry `category` and `modified_secs` for each file, and the scan summary
   carries `files_without_twin`, `bytes_read` and `cloud_only_skipped`; the pages do not use
-  them yet. Still to do: progress in bytes, and scan cancellation.
-- Matching settings stored in the database, with commands to read and change them and to regroup
-  from cached results (with progress and cancel).
+  them yet. Progress in bytes, scan cancellation and hard-link detection are done too.
+- ~~Matching settings stored in the database, with commands to read and change them and to
+  regroup from cached results (with progress and cancel)~~ Done
+  ([0014](decisions/0014-tunable-matching.md)); the old pages have a basic preset menu, the
+  redesign adds the full control and the Advanced values.
 - A "not a duplicate" list.
 - Deletion history and undo for the Recycle Bin, and a local lifetime total.

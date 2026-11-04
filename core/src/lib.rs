@@ -10,6 +10,7 @@ pub mod db;
 pub mod error;
 pub mod grouping;
 pub mod hashing;
+pub mod matching;
 pub mod metadata;
 pub mod model;
 pub mod recommend;
@@ -18,6 +19,7 @@ pub mod service;
 
 pub use error::{Error, Result};
 pub use grouping::GroupingConfig;
+pub use matching::{MatchingSettings, Preset};
 pub use model::{DuplicateGroup, FileRecord, GroupKind, GroupMember};
 pub use scanner::ScanOptions;
 
@@ -125,6 +127,7 @@ pub struct Engine {
     conn: Connection,
     pub grouping: GroupingConfig,
     pub scan_options: ScanOptions,
+    matching_preset: Preset,
 }
 
 impl Engine {
@@ -132,19 +135,91 @@ impl Engine {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
         }
-        Ok(Self {
-            conn: db::open(db_path)?,
-            grouping: GroupingConfig::default(),
-            scan_options: ScanOptions::default(),
-        })
+        Self::with_connection(db::open(db_path)?)
     }
 
     pub fn open_in_memory() -> Result<Self> {
-        Ok(Self {
-            conn: db::open_in_memory()?,
+        Self::with_connection(db::open_in_memory()?)
+    }
+
+    fn with_connection(conn: Connection) -> Result<Self> {
+        let mut engine = Self {
+            conn,
             grouping: GroupingConfig::default(),
             scan_options: ScanOptions::default(),
-        })
+            matching_preset: Preset::Balanced,
+        };
+        engine.load_settings()?;
+        Ok(engine)
+    }
+
+    /// Restores the saved matching and scan settings (the defaults on a fresh database).
+    fn load_settings(&mut self) -> Result<()> {
+        let get = |key: &str| db::get_setting(&self.conn, key);
+        let preset = get("matching.preset")?
+            .and_then(|k| Preset::from_key(&k))
+            .unwrap_or(Preset::Balanced);
+        let defaults = GroupingConfig::default();
+        let number = |key: &str| -> Result<Option<f64>> {
+            Ok(get(key)?.and_then(|v| v.parse::<f64>().ok()))
+        };
+        let settings = if preset == Preset::Custom {
+            MatchingSettings::custom(GroupingConfig {
+                phash_max: number("matching.phash_max")?.map_or(defaults.phash_max, |v| v as u32),
+                dhash_max: number("matching.dhash_max")?.map_or(defaults.dhash_max, |v| v as u32),
+                aspect_tolerance: number("matching.aspect_tolerance")?
+                    .unwrap_or(defaults.aspect_tolerance),
+                max_local_difference: number("matching.max_local_difference")?
+                    .unwrap_or(defaults.max_local_difference),
+                look_alikes: true,
+            })
+            // A damaged or hand-edited value falls back to the default rather than blocking.
+            .unwrap_or_default()
+        } else {
+            MatchingSettings::preset(preset)
+        };
+        self.grouping = settings.config;
+        self.matching_preset = settings.preset;
+        if let Some(min) = get("scan.min_size")?.and_then(|v| v.parse().ok()) {
+            self.scan_options.min_size = min;
+        }
+        Ok(())
+    }
+
+    /// The current matching setting.
+    pub fn matching(&self) -> MatchingSettings {
+        MatchingSettings {
+            preset: self.matching_preset,
+            config: self.grouping,
+        }
+    }
+
+    /// Changes and saves the matching setting. Takes effect on the next [`Engine::groups`];
+    /// no rescan is needed.
+    pub fn set_matching(&mut self, settings: MatchingSettings) -> Result<()> {
+        let c = &settings.config;
+        for (key, value) in [
+            ("matching.preset", settings.preset.key().to_string()),
+            ("matching.phash_max", c.phash_max.to_string()),
+            ("matching.dhash_max", c.dhash_max.to_string()),
+            ("matching.aspect_tolerance", c.aspect_tolerance.to_string()),
+            (
+                "matching.max_local_difference",
+                c.max_local_difference.to_string(),
+            ),
+        ] {
+            db::set_setting(&self.conn, key, &value)?;
+        }
+        self.grouping = settings.config;
+        self.matching_preset = settings.preset;
+        Ok(())
+    }
+
+    /// Changes and saves what a scan includes. Takes effect on the next scan.
+    pub fn set_scan_options(&mut self, options: ScanOptions) -> Result<()> {
+        db::set_setting(&self.conn, "scan.min_size", &options.min_size.to_string())?;
+        self.scan_options = options;
+        Ok(())
     }
 
     /// Remembers a folder for scanning. Returns the canonical path that was stored.

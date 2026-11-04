@@ -688,3 +688,108 @@ fn a_cancelled_comparison_returns_cancelled() {
     assert_eq!(groups.len(), 1);
     assert_eq!(steps.lock().unwrap().last(), Some(&(1, 1)));
 }
+
+// ---------------------------------------------------------------------------------------------
+// Matching settings.
+// ---------------------------------------------------------------------------------------------
+
+use dupelens_core::{GroupingConfig, MatchingSettings, Preset, ScanOptions};
+
+#[test]
+fn changing_the_preset_regroups_without_rescanning() {
+    let lib = library(); // original.png, an exact copy, and a resized JPEG of it
+    let mut engine = engine_for(&lib);
+    engine.scan(&|_| {}).unwrap();
+
+    let members = |engine: &Engine| {
+        let groups = engine.groups().unwrap();
+        (groups.len(), groups.first().map_or(0, |g| g.members.len()))
+    };
+    assert_eq!(members(&engine), (1, 3), "Balanced: all three");
+
+    engine
+        .set_matching(MatchingSettings::preset(Preset::ExactOnly))
+        .unwrap();
+    assert_eq!(
+        members(&engine),
+        (1, 2),
+        "Exact only: the resized copy is left out"
+    );
+    assert_eq!(engine.groups().unwrap()[0].kind, GroupKind::Exact);
+
+    engine
+        .set_matching(MatchingSettings::preset(Preset::Balanced))
+        .unwrap();
+    assert_eq!(
+        members(&engine),
+        (1, 3),
+        "back to Balanced, no rescan in between"
+    );
+
+    // A rescan after all that still reads nothing.
+    let again = engine.scan(&|_| {}).unwrap();
+    assert_eq!(again.files_analyzed, 0);
+}
+
+#[test]
+fn settings_survive_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("app.db");
+    {
+        let mut engine = Engine::open(&db).unwrap();
+        assert_eq!(engine.matching().preset, Preset::Balanced, "default");
+        engine
+            .set_matching(
+                MatchingSettings::custom(GroupingConfig {
+                    phash_max: 5,
+                    dhash_max: 7,
+                    aspect_tolerance: 0.04,
+                    max_local_difference: 12.5,
+                    ..GroupingConfig::default()
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        engine
+            .set_scan_options(ScanOptions { min_size: 4096 })
+            .unwrap();
+    }
+    let engine = Engine::open(&db).unwrap();
+    let m = engine.matching();
+    assert_eq!(m.preset, Preset::Custom);
+    assert_eq!(
+        (
+            m.config.phash_max,
+            m.config.dhash_max,
+            m.config.aspect_tolerance,
+            m.config.max_local_difference
+        ),
+        (5, 7, 0.04, 12.5)
+    );
+    assert_eq!(engine.scan_options.min_size, 4096);
+
+    let mut engine = engine;
+    engine
+        .set_matching(MatchingSettings::preset(Preset::Loose))
+        .unwrap();
+    drop(engine);
+    assert_eq!(Engine::open(&db).unwrap().matching().preset, Preset::Loose);
+}
+
+#[test]
+fn a_minimum_size_leaves_small_files_out() {
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir.path().join("a/tiny.txt"), b"hello");
+    write(&dir.path().join("b/tiny.txt"), b"hello");
+    let mut engine = engine_with_folder(dir.path());
+    engine
+        .set_scan_options(ScanOptions { min_size: 1024 })
+        .unwrap();
+    engine.scan(&|_| {}).unwrap();
+    assert!(engine.groups().unwrap().is_empty());
+    engine
+        .set_scan_options(ScanOptions { min_size: 1 })
+        .unwrap();
+    engine.scan(&|_| {}).unwrap();
+    assert_eq!(engine.groups().unwrap().len(), 1);
+}

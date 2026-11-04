@@ -21,6 +21,9 @@ pub enum Error {
     #[error("refusing to delete: {0}")]
     DeletionRefused(String),
 
+    #[error("invalid setting: {0}")]
+    InvalidSetting(String),
+
     /// The user stopped a scan or comparison. Nothing is left half-written.
     #[error("cancelled")]
     Cancelled,

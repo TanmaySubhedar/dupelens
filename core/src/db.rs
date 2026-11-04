@@ -51,6 +51,10 @@ fn init(conn: Connection) -> Result<Connection> {
              scan_id   INTEGER NOT NULL
          );
          CREATE INDEX IF NOT EXISTS files_sha256 ON files(sha256);
+         CREATE TABLE IF NOT EXISTS settings (
+             key   TEXT PRIMARY KEY,
+             value TEXT NOT NULL
+         );
          CREATE TABLE IF NOT EXISTS meta (
              key   TEXT PRIMARY KEY,
              value INTEGER NOT NULL
@@ -92,6 +96,23 @@ pub fn folders(conn: &Connection) -> Result<Vec<PathBuf>> {
     Ok(rows
         .map(|r| r.map(PathBuf::from))
         .collect::<rusqlite::Result<_>>()?)
+}
+
+pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+            r.get(0)
+        })
+        .optional()?)
+}
+
+pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
 }
 
 pub fn next_scan_id(conn: &Connection) -> Result<i64> {

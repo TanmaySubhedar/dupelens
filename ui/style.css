@@ -104,6 +104,15 @@ main { max-width: 1280px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; outline:
 .folder-path { flex: 1; overflow-wrap: anywhere; }
 .scan-row { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; margin-top: 1.25rem; }
 
+/* ---------- matching setting ---------- */
+.matching { margin: 1.25rem 0 0; }
+.matching h2 { font-size: 1rem; margin: 0 0 .4rem; }
+select {
+  font: inherit; padding: .45rem .75rem; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--bg); color: var(--text);
+}
+select:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
 /* ---------- scan progress ---------- */
 .phase { font-size: 1.1rem; font-weight: 600; margin: 1.25rem 0 .75rem; }
 .bar { height: 10px; background: var(--surface-2); border-radius: 99px; overflow: hidden; }
@@ -137,6 +146,7 @@ main { max-width: 1280px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; outline:
 .pill { display: inline-block; font-size: .75rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; padding: .1rem .5rem; border-radius: 99px; }
 .pill.exact { background: var(--surface-2); color: var(--accent); }
 .pill.near { background: var(--surface-2); color: var(--warn); }
+.pill.maybe { background: var(--surface-2); color: var(--warn); margin-left: .35rem; }
 .more { align-self: center; }
 
 .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: .75rem; }

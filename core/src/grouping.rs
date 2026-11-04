@@ -15,8 +15,10 @@ use crate::model::{DuplicateGroup, FileRecord, GroupKind, GroupMember};
 use crate::recommend::recommend;
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GroupingConfig {
+    /// Look for look-alike photos at all. Off means exact copies only.
+    pub look_alikes: bool,
     /// Max pHash distance (of 64 bits) for two images to count as near duplicates.
     pub phash_max: u32,
     /// Max dHash distance, checked as a second opinion to cut false positives.
@@ -31,6 +33,7 @@ pub struct GroupingConfig {
 impl Default for GroupingConfig {
     fn default() -> Self {
         Self {
+            look_alikes: true,
             phash_max: 8,
             dhash_max: 12,
             aspect_tolerance: 0.05,
@@ -143,6 +146,9 @@ fn first_of_each_content(files: &[FileRecord]) -> HashMap<&str, usize> {
 /// the candidates that still need the pixel check. One file stands in for each distinct
 /// content, so byte-identical copies never need comparing.
 pub fn near_candidates(files: &[FileRecord], cfg: &GroupingConfig) -> Vec<(usize, usize)> {
+    if !cfg.look_alikes {
+        return Vec::new();
+    }
     let mut reps: Vec<usize> = first_of_each_content(files)
         .into_values()
         .filter(|&i| files[i].phash.is_some())
@@ -208,6 +214,10 @@ pub fn build_groups(
 }
 
 fn make_group(mut files: Vec<FileRecord>) -> DuplicateGroup {
+    // "Tentative" means only a looser setting than the default finds it: some member is further
+    // from the suggested copy than the Balanced preset allows. The UI does not pre-select such
+    // groups for deletion.
+    let balanced = GroupingConfig::default().phash_max;
     files.sort_by_key(|f| f.id);
     let (best, reason) = recommend(&files);
     let keep = files[best].clone();
@@ -232,9 +242,14 @@ fn make_group(mut files: Vec<FileRecord>) -> DuplicateGroup {
             file: f,
         })
         .collect::<Vec<_>>();
+    let tentative = kind == GroupKind::Near
+        && members
+            .iter()
+            .any(|m| m.distance_to_recommended.is_some_and(|d| d > balanced));
     DuplicateGroup {
         id: members.iter().map(|m| m.file.id).min().expect("non-empty"),
         kind,
+        tentative,
         recommended_id: keep.id,
         reason,
         reclaimable_bytes,
@@ -319,6 +334,50 @@ mod tests {
         assert!(build_groups(files.clone(), &cfg, &mut |_, _| Some(40.0)).is_empty());
         assert!(build_groups(files.clone(), &cfg, &mut |_, _| None).is_empty());
         assert_eq!(build_groups(files, &cfg, &mut |_, _| Some(5.0)).len(), 1);
+    }
+
+    #[test]
+    fn only_a_looser_setting_finds_a_tentative_group() {
+        let loose = crate::matching::Preset::Loose.config();
+        let ten_bits = 0b11_1111_1111;
+        let files = vec![
+            rec(1, "a", 0, 0, 100, 100),
+            rec(2, "b", ten_bits, ten_bits, 100, 100),
+        ];
+        // Ten bits apart: beyond Balanced (8), within Loose (12).
+        assert!(
+            build_groups(files.clone(), &GroupingConfig::default(), &mut |_, _| Some(
+                0.0
+            ))
+            .is_empty()
+        );
+        let groups = build_groups(files, &loose, &mut |_, _| Some(0.0));
+        assert_eq!(groups.len(), 1);
+        assert!(groups[0].tentative, "needs the Loose setting to be found");
+
+        // Five bits apart: Balanced finds it too, so it is not tentative.
+        let close = vec![
+            rec(1, "a", 0, 0, 100, 100),
+            rec(2, "b", 0b11111, 0b11111, 100, 100),
+        ];
+        let groups = build_groups(close, &loose, &mut |_, _| Some(0.0));
+        assert!(!groups[0].tentative);
+    }
+
+    #[test]
+    fn exact_copies_are_never_tentative() {
+        let loose = crate::matching::Preset::Loose.config();
+        let files = vec![rec(1, "a", 0, 0, 100, 100), rec(2, "a", 0, 0, 100, 100)];
+        assert!(!build_groups(files, &loose, &mut |_, _| Some(0.0))[0].tentative);
+    }
+
+    #[test]
+    fn look_alikes_can_be_switched_off() {
+        let files = vec![rec(1, "a", 0, 0, 100, 100), rec(2, "b", 1, 1, 100, 100)];
+        let off = crate::matching::Preset::ExactOnly.config();
+        assert!(
+            build_groups(files, &off, &mut |_, _| panic!("no pixel check when off")).is_empty()
+        );
     }
 
     #[test]
