@@ -39,7 +39,17 @@ pub fn partial_hash(path: &std::path::Path, size: u64) -> std::io::Result<String
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-pub fn sha256_reader(mut reader: impl Read) -> std::io::Result<String> {
+pub fn sha256_reader(reader: impl Read) -> std::io::Result<String> {
+    sha256_reader_with(reader, &mut |_| true)
+}
+
+/// Like [`sha256_reader`], but reports each chunk read (in bytes) to `on_chunk`. If it returns
+/// `false` the read stops with an [`std::io::ErrorKind::Interrupted`] error, so a scan can be
+/// cancelled in the middle of a multi-gigabyte file.
+pub fn sha256_reader_with(
+    mut reader: impl Read,
+    on_chunk: &mut dyn FnMut(u64) -> bool,
+) -> std::io::Result<String> {
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
     loop {
@@ -48,6 +58,9 @@ pub fn sha256_reader(mut reader: impl Read) -> std::io::Result<String> {
             break;
         }
         hasher.update(&buf[..n]);
+        if !on_chunk(n as u64) {
+            return Err(std::io::ErrorKind::Interrupted.into());
+        }
     }
     Ok(format!("{:x}", hasher.finalize()))
 }

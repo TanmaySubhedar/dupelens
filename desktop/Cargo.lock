@@ -957,6 +957,7 @@ dependencies = [
  "kamadak-exif",
  "rayon",
  "rusqlite",
+ "same-file",
  "serde",
  "serde_json",
  "sha2",

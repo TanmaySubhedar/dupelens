@@ -20,6 +20,8 @@ const state = {
   filter: 'all', // 'all' | 'exact' | 'near'
   shown: GROUPS_PER_PAGE,
   lastSummary: null,
+  settings: null,
+  suggested: [],
 };
 
 // ---------- small shared pieces ----------
@@ -80,10 +82,56 @@ async function showFolders() {
   mount(main, h('p', { class: 'muted' }, 'Loading…'));
   try {
     state.folders = await call('folders');
+    state.settings = await call('get_settings');
+    state.suggested = await call('suggested_folders').catch(() => []);
   } catch (e) {
     showError(e);
   }
   renderFolders();
+}
+
+/** First run: one-click suggestions for the folders most people want cleaned. */
+function suggestionsSection() {
+  const chosen = new Set(state.folders.map((f) => f.toLowerCase()));
+  const left = state.suggested.filter((s) => !chosen.has(s.path.toLowerCase()));
+  if (state.folders.length > 0 || left.length === 0) return null;
+  return h('div', { class: 'suggestions' },
+    h('p', { class: 'muted small' }, 'Quick start: add the folders where duplicates usually build up.'),
+    h('div', { class: 'chips' }, left.map((s) =>
+      h('button', { class: 'secondary', title: s.path, onclick: (e) => busy(e.currentTarget, () => addFolder(s.path)) }, `+ ${s.name}`))));
+}
+
+/** "How alike must files be?": the matching preset. Changing it regroups without rescanning. */
+function matchingSection() {
+  const st = state.settings;
+  if (!st) return null;
+  const description = h('p', { class: 'muted small' }, st.presets.find((p) => p.key === st.preset)?.description ?? '');
+  const select = h('select', {
+    'aria-label': 'How alike must files be to count as duplicates',
+    onchange: async (e) => {
+      const preset = e.currentTarget.value;
+      try {
+        state.settings = await call('set_settings', { preset });
+        if (state.groups.length > 0 || state.lastSummary) await startRegroup();
+        else {
+          description.textContent = state.settings.presets.find((p) => p.key === preset)?.description ?? '';
+          toast('Saved. It applies to your next scan.');
+        }
+      } catch (err) {
+        showError(err);
+        // Show what is really saved, not the choice that failed.
+        state.settings = await call('get_settings').catch(() => state.settings);
+        renderFolders();
+      }
+    },
+  }, st.presets
+    .filter((p) => p.key !== 'custom' || st.preset === 'custom')
+    .map((p) => h('option', { value: p.key, selected: p.key === st.preset }, p.name)));
+  return h('div', { class: 'matching' },
+    h('h2', {}, 'How alike must files be?'),
+    select,
+    description,
+    h('p', { class: 'muted small' }, 'Changing this updates your results in seconds, without scanning again.'));
 }
 
 function renderFolders() {
@@ -110,6 +158,7 @@ function renderFolders() {
       h('div', { class: 'folder-actions' },
         h('button', { class: 'primary', onclick: (e) => busy(e.currentTarget, chooseFolder) }, '+ Choose folder…'),
       ),
+      suggestionsSection(),
       h('div', { class: 'path-row' }, pathInput, addButton),
       state.folders.length === 0
         ? h('p', { class: 'empty' }, 'No folders yet.')
@@ -119,6 +168,7 @@ function renderFolders() {
             h('span', { class: 'folder-path', title: f }, f),
             h('button', { class: 'icon', title: 'Remove this folder', 'aria-label': `Remove ${f}`, onclick: (e) => busy(e.currentTarget, () => removeFolder(f)) }, '✕'),
           ))),
+      matchingSection(),
       h('div', { class: 'scan-row' }, scanButton,
         state.groups.length > 0 && h('button', { class: 'link', onclick: () => showResults() }, `Back to results (${plural(state.groups.length, 'group')})`)),
     ),
@@ -157,13 +207,21 @@ async function startScan() {
   showScan();
 }
 
-function showScan() {
-  const label = h('p', { class: 'phase' }, PHASES.discovering);
+/** Re-groups the last scan's results with the current matching setting; no folders are re-read. */
+async function startRegroup() {
+  await call('start_regroup');
+  showScan({ title: 'Updating results', note: 'Using what was already scanned, so only new look-alike comparisons take time.' });
+}
+
+function showScan({ title = 'Scanning', note = 'Files that haven’t changed since the last scan are skipped, so rescans are quick.' } = {}) {
+  const label = h('p', { class: 'phase' }, title === 'Scanning' ? PHASES.discovering : PHASES.comparing);
   const bar = h('div', { class: 'bar indeterminate' }, h('div', { class: 'fill' }));
   const count = h('p', { class: 'muted count' }, '');
+  const cancelButton = h('button', { class: 'secondary', onclick: (e) => busy(e.currentTarget, () => call('cancel')) }, 'Cancel');
   mount(main, h('section', { class: 'card narrow center' },
-    h('h1', {}, 'Scanning'), label, bar, count,
-    h('p', { class: 'muted small' }, 'Files that haven’t changed since the last scan are skipped, so rescans are quick.'),
+    h('h1', {}, title), label, bar, count,
+    h('p', { class: 'muted small' }, note),
+    h('p', {}, cancelButton),
   ));
 
   const tick = async () => {
@@ -176,14 +234,26 @@ function showScan() {
     }
     if (status.state === 'running') {
       label.textContent = PHASES[status.phase] ?? 'Working…';
-      const known = status.phase === 'analyzing' && status.total > 0;
+      const byBytes = status.phase === 'analyzing' && status.bytes_total > 0;
+      const byFiles = (status.phase === 'analyzing' || status.phase === 'comparing') && status.total > 0;
+      const known = byBytes || byFiles;
       bar.classList.toggle('indeterminate', !known);
-      bar.firstChild.style.setProperty('width', known ? `${(100 * status.done) / status.total}%` : '');
-      count.textContent = known ? `${status.done.toLocaleString()} of ${status.total.toLocaleString()}` : '';
+      const fraction = byBytes ? status.bytes_done / status.bytes_total : status.done / (status.total || 1);
+      bar.firstChild.style.setProperty('width', known ? `${Math.min(100, 100 * fraction)}%` : '');
+      count.textContent = byBytes
+        ? `${formatBytes(status.bytes_done)} of ${formatBytes(status.bytes_total)} · ${status.done.toLocaleString()} of ${status.total.toLocaleString()} files`
+        : byFiles ? `${status.done.toLocaleString()} of ${status.total.toLocaleString()}` : '';
       return setTimeout(tick, POLL_MS);
     }
-    if (status.state === 'failed') {
-      toast(`Scan failed: ${status.error}`, 'error');
+    if (status.state === 'failed' || status.state === 'cancelled') {
+      // The engine has dropped its cached results (and a regroup may already have saved a new
+      // matching setting), so the groups held here no longer match it. Forget them: the person
+      // rescans or updates the results, rather than acting on a list from the old setting.
+      state.groups = [];
+      state.selection.load([]);
+      state.lastSummary = null;
+      if (status.state === 'failed') toast(`${title} failed: ${status.error}`, 'error');
+      else toast('Cancelled. Nothing was lost; files already read are remembered.');
       return showFolders();
     }
     state.lastSummary = status.state === 'done' ? status.summary : null;
@@ -307,6 +377,7 @@ function fillGroupCard(card, group) {
     h('header', {},
       h('div', {},
         h('span', { class: `pill ${group.kind}` }, kind),
+        group.tentative && h('span', { class: 'pill maybe', title: 'Found only because matching is set looser than Balanced. Nothing is pre-selected; check these before deleting.' }, 'Maybe'),
         h('span', { class: 'group-title' }, ` ${plural(group.members.length, 'file')} · deleting ${marked.size} frees ${formatBytes(freed)}`),
         h('p', { class: 'reason' }, `👑 ${group.reason}`)),
       h('div', { class: 'group-buttons' },
@@ -426,20 +497,33 @@ function trashName() {
 async function doDelete(ids, permanent) {
   const report = await call('delete', { ids, permanent });
   await loadGroups({ keepPrevious: true });
-  showDone(report, permanent);
+  const stats = await call('stats').catch(() => null);
+  showDone(report, permanent, stats);
 }
 
-function showDone(report, permanent) {
+/** Puts the last delete action back from the Recycle Bin, then rescans so the files show again. */
+async function undoLast(batch) {
+  const r = await call('undo', { batch });
+  const failed = r.failed.length ? ` ${plural(r.failed.length, 'file')} could not be restored: ${r.failed[0].reason}.` : '';
+  toast(`Restored ${plural(r.restored, 'file')}.${failed}`, r.failed.length ? 'warn' : 'info');
+  await startScan();
+}
+
+function showDone(report, permanent, stats) {
   const where = permanent ? 'deleted permanently' : `moved to the ${trashName()}`;
+  const canUndo = !permanent && state.info.undo_supported && report.batch != null && report.deleted.length > 0;
   mount(main, h('section', { class: 'card narrow center' },
     h('div', { class: 'big-emoji', 'aria-hidden': 'true' }, report.failed.length ? '⚠️' : '✅'),
     h('h1', {}, `${plural(report.deleted.length, 'file')} ${where}`),
     h('p', { class: 'lead' }, `${formatBytes(report.bytes_freed)} freed.`),
+    !permanent && h('p', { class: 'muted small' }, `Disk space returns when you empty the ${trashName()}. Until then you can restore these files.`),
+    stats && stats.bytes_freed > 0 && h('p', { class: 'muted' }, `Freed so far with DupeLens: ${formatBytes(stats.bytes_freed)} (${plural(stats.files_deleted, 'file')}).`),
     report.failed.length > 0 && h('div', { class: 'failures' },
       h('p', {}, `${plural(report.failed.length, 'file was', 'files were')} skipped and left untouched:`),
       h('ul', {}, report.failed.map((f) => h('li', {}, h('span', { class: 'name' }, f.path || `File ${f.id}`), ` — ${f.reason}`)))),
     h('div', { class: 'review-buttons' },
       state.groups.length > 0 && h('button', { class: 'primary', onclick: showResults }, `Continue with ${plural(state.groups.length, 'remaining group')}`),
+      canUndo && h('button', { class: 'secondary', onclick: (e) => busy(e.currentTarget, () => undoLast(report.batch)) }, `Undo: restore ${plural(report.deleted.length, 'file')}`),
       h('button', { class: 'secondary', onclick: showFolders }, 'Back to folders')),
   ));
 }

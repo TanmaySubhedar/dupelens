@@ -560,3 +560,410 @@ fn an_old_database_is_upgraded_without_losing_folders() {
     let engine = Engine::open(&db).unwrap();
     assert_eq!(engine.folders().unwrap(), vec![PathBuf::from("/kept")]);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Cancelling, byte progress and hard links.
+// ---------------------------------------------------------------------------------------------
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+
+#[test]
+fn a_scan_cancelled_before_it_starts_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = filler(50_000, 1);
+    write(&dir.path().join("a.bin"), &data);
+    write(&dir.path().join("b.bin"), &data);
+    let mut engine = engine_with_folder(dir.path());
+
+    let cancel = AtomicBool::new(true);
+    assert!(matches!(
+        engine.scan_cancellable(&|_| {}, &cancel),
+        Err(Error::Cancelled)
+    ));
+    assert!(engine.groups().unwrap().is_empty(), "nothing was saved");
+
+    // The same engine scans normally afterwards.
+    engine.scan(&|_| {}).unwrap();
+    assert_eq!(engine.groups().unwrap().len(), 1);
+}
+
+#[test]
+fn cancelling_while_reading_keeps_the_database_usable() {
+    let dir = tempfile::tempdir().unwrap();
+    // Several big identical pairs, so there is real work to interrupt.
+    for i in 0..6u8 {
+        let data = filler(3_000_000, i);
+        write(&dir.path().join(format!("a/{i}.bin")), &data);
+        write(&dir.path().join(format!("b/{i}.bin")), &data);
+    }
+    let mut engine = engine_with_folder(dir.path());
+
+    let cancel = AtomicBool::new(false);
+    let result = engine.scan_cancellable(
+        &|p| {
+            if p.phase == dupelens_core::ScanPhase::Analyzing && p.bytes_done > 0 {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        },
+        &cancel,
+    );
+    assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
+
+    // A complete scan afterwards still finds every pair.
+    engine.scan(&|_| {}).unwrap();
+    assert_eq!(engine.groups().unwrap().len(), 6);
+}
+
+#[test]
+fn progress_reports_bytes_to_read_and_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = filler(2_500_000, 3);
+    write(&dir.path().join("x/clip.bin"), &data);
+    write(&dir.path().join("y/clip.bin"), &data);
+    write(&dir.path().join("only-one.bin"), &filler(123_457, 4)); // never read
+    let mut engine = engine_with_folder(dir.path());
+
+    let last = Mutex::new((0u64, 0u64));
+    engine
+        .scan(&|p| {
+            if p.phase == dupelens_core::ScanPhase::Analyzing && p.bytes_total > 0 {
+                *last.lock().unwrap() = (p.bytes_done, p.bytes_total);
+            }
+        })
+        .unwrap();
+    let (done, total) = *last.lock().unwrap();
+    assert_eq!(total, 5_000_000, "only the twins are to be read");
+    assert_eq!(done, total, "the bar reaches the end");
+}
+
+#[test]
+fn hard_links_are_not_reported_as_duplicates() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(&root.join("one/report.pdf"), &filler(9_000, 7));
+    fs::create_dir_all(root.join("two")).unwrap();
+    fs::hard_link(root.join("one/report.pdf"), root.join("two/report.pdf")).unwrap();
+
+    let mut engine = engine_with_folder(root);
+    let summary = engine.scan(&|_| {}).unwrap();
+    assert_eq!(summary.hard_links_skipped, 1);
+    assert_eq!(summary.files_found, 1);
+    assert!(engine.groups().unwrap().is_empty());
+
+    // A genuine copy next to them is still found.
+    write(&root.join("three/report.pdf"), &filler(9_000, 7));
+    engine.scan(&|_| {}).unwrap();
+    let groups = engine.groups().unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].members.len(), 2);
+}
+
+#[test]
+fn a_cancelled_comparison_returns_cancelled() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = scene(400, 300, 3);
+    save(&a, &dir.path().join("a.png"), ImageFormat::Png);
+    save(
+        &a.resize_exact(200, 150, image::imageops::FilterType::Lanczos3),
+        &dir.path().join("b.jpg"),
+        ImageFormat::Jpeg,
+    );
+    let mut engine = engine_with_folder(dir.path());
+    engine.scan(&|_| {}).unwrap();
+
+    let cancel = AtomicBool::new(true);
+    assert!(matches!(
+        engine.groups_cancellable(&|_, _| {}, &cancel),
+        Err(Error::Cancelled)
+    ));
+    // Not cancelled: finds the pair, and reports its progress.
+    let steps = Mutex::new(Vec::new());
+    let groups = engine
+        .groups_cancellable(
+            &|d, t| steps.lock().unwrap().push((d, t)),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(steps.lock().unwrap().last(), Some(&(1, 1)));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Matching settings.
+// ---------------------------------------------------------------------------------------------
+
+use dupelens_core::{GroupingConfig, MatchingSettings, Preset, ScanOptions};
+
+#[test]
+fn changing_the_preset_regroups_without_rescanning() {
+    let lib = library(); // original.png, an exact copy, and a resized JPEG of it
+    let mut engine = engine_for(&lib);
+    engine.scan(&|_| {}).unwrap();
+
+    let members = |engine: &Engine| {
+        let groups = engine.groups().unwrap();
+        (groups.len(), groups.first().map_or(0, |g| g.members.len()))
+    };
+    assert_eq!(members(&engine), (1, 3), "Balanced: all three");
+
+    engine
+        .set_matching(MatchingSettings::preset(Preset::ExactOnly))
+        .unwrap();
+    assert_eq!(
+        members(&engine),
+        (1, 2),
+        "Exact only: the resized copy is left out"
+    );
+    assert_eq!(engine.groups().unwrap()[0].kind, GroupKind::Exact);
+
+    engine
+        .set_matching(MatchingSettings::preset(Preset::Balanced))
+        .unwrap();
+    assert_eq!(
+        members(&engine),
+        (1, 3),
+        "back to Balanced, no rescan in between"
+    );
+
+    // A rescan after all that still reads nothing.
+    let again = engine.scan(&|_| {}).unwrap();
+    assert_eq!(again.files_analyzed, 0);
+}
+
+#[test]
+fn settings_survive_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("app.db");
+    {
+        let mut engine = Engine::open(&db).unwrap();
+        assert_eq!(engine.matching().preset, Preset::Balanced, "default");
+        engine
+            .set_matching(
+                MatchingSettings::custom(GroupingConfig {
+                    phash_max: 5,
+                    dhash_max: 7,
+                    aspect_tolerance: 0.04,
+                    max_local_difference: 12.5,
+                    ..GroupingConfig::default()
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        engine
+            .set_scan_options(ScanOptions { min_size: 4096 })
+            .unwrap();
+    }
+    let engine = Engine::open(&db).unwrap();
+    let m = engine.matching();
+    assert_eq!(m.preset, Preset::Custom);
+    assert_eq!(
+        (
+            m.config.phash_max,
+            m.config.dhash_max,
+            m.config.aspect_tolerance,
+            m.config.max_local_difference
+        ),
+        (5, 7, 0.04, 12.5)
+    );
+    assert_eq!(engine.scan_options.min_size, 4096);
+
+    let mut engine = engine;
+    engine
+        .set_matching(MatchingSettings::preset(Preset::Loose))
+        .unwrap();
+    drop(engine);
+    assert_eq!(Engine::open(&db).unwrap().matching().preset, Preset::Loose);
+}
+
+#[test]
+fn a_minimum_size_leaves_small_files_out() {
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir.path().join("a/tiny.txt"), b"hello");
+    write(&dir.path().join("b/tiny.txt"), b"hello");
+    let mut engine = engine_with_folder(dir.path());
+    engine
+        .set_scan_options(ScanOptions { min_size: 1024 })
+        .unwrap();
+    engine.scan(&|_| {}).unwrap();
+    assert!(engine.groups().unwrap().is_empty());
+    engine
+        .set_scan_options(ScanOptions { min_size: 1 })
+        .unwrap();
+    engine.scan(&|_| {}).unwrap();
+    assert_eq!(engine.groups().unwrap().len(), 1);
+}
+
+// ---------------------------------------------------------------------------------------------
+// History, lifetime totals and undo.
+// ---------------------------------------------------------------------------------------------
+
+/// Two identical 10 KB files; returns the engine and the id and path of the one to delete.
+fn twin_files() -> (tempfile::TempDir, Engine, i64, PathBuf, i64) {
+    let dir = tempfile::tempdir().unwrap();
+    let data = filler(10_000, 6);
+    write(&dir.path().join("keep/doc.pdf"), &data);
+    write(&dir.path().join("extra/doc.pdf"), &data);
+    let mut engine = engine_with_folder(dir.path());
+    engine.scan(&|_| {}).unwrap();
+    let g = engine.groups().unwrap().remove(0);
+    let victim = g
+        .members
+        .iter()
+        .find(|m| m.file.id != g.recommended_id)
+        .unwrap();
+    let (id, path) = (victim.file.id, victim.file.path.clone());
+    (dir, engine, id, path, g.recommended_id)
+}
+
+#[test]
+fn deletions_are_remembered_and_counted() {
+    let (_dir, mut engine, victim, path, _) = twin_files();
+    let before = engine.stats().unwrap();
+    assert_eq!((before.bytes_freed, before.files_deleted), (0, 0));
+    assert!(before.last_batch.is_none() && before.last_cleaned.is_none());
+
+    let report = engine.delete(&[victim], DeleteMode::Permanent).unwrap();
+    assert_eq!(report.batch, Some(1));
+    assert!(!path.exists());
+
+    let stats = engine.stats().unwrap();
+    assert_eq!((stats.bytes_freed, stats.files_deleted), (10_000, 1));
+    assert!(stats.last_cleaned.is_some());
+    let batch = stats.last_batch.unwrap();
+    assert_eq!((batch.id, batch.files, batch.bytes), (1, 1, 10_000));
+    assert!(!batch.restorable, "a permanent delete cannot be undone");
+
+    // And it cannot be undone.
+    assert!(matches!(engine.undo(None), Err(Error::UndoUnavailable(_))));
+}
+
+#[test]
+fn undo_brings_a_file_back_from_the_recycle_bin() {
+    if !dupelens_core::trash_supported() || !dupelens_core::undo_supported() {
+        return;
+    }
+    let (_dir, mut engine, victim, path, _) = twin_files();
+    let report = engine.delete(&[victim], DeleteMode::Trash).unwrap();
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    assert!(!path.exists());
+    let stats = engine.stats().unwrap();
+    assert_eq!(stats.bytes_freed, 10_000);
+    assert!(stats.last_batch.as_ref().unwrap().restorable);
+
+    let restored = engine.undo(None).unwrap();
+    assert!(restored.failed.is_empty(), "{:?}", restored.failed);
+    assert_eq!(restored.restored, 1);
+    assert!(path.exists(), "the file is back where it was");
+    assert_eq!(std::fs::read(&path).unwrap(), filler(10_000, 6));
+
+    // The lifetime total no longer counts it, and there is nothing further to undo.
+    let after = engine.stats().unwrap();
+    assert_eq!((after.bytes_freed, after.files_deleted), (0, 0));
+    assert!(after.last_batch.is_none());
+    assert!(matches!(engine.undo(None), Err(Error::UndoUnavailable(_))));
+
+    // A rescan sees the pair again.
+    engine.scan(&|_| {}).unwrap();
+    assert_eq!(engine.groups().unwrap().len(), 1);
+}
+
+#[test]
+fn undo_reports_a_file_that_left_the_bin_and_one_whose_path_is_taken() {
+    if !dupelens_core::trash_supported() || !dupelens_core::undo_supported() {
+        return;
+    }
+    let (_dir, mut engine, victim, path, _) = twin_files();
+    engine.delete(&[victim], DeleteMode::Trash).unwrap();
+
+    // Something new now sits at the old path: restoring must not overwrite it.
+    std::fs::write(&path, b"someone else's file").unwrap();
+    let blocked = engine.undo(None).unwrap();
+    assert_eq!((blocked.restored, blocked.failed.len()), (0, 1));
+    assert_eq!(std::fs::read(&path).unwrap(), b"someone else's file");
+    std::fs::remove_file(&path).unwrap();
+
+    // The bin was emptied in the meantime.
+    let items = trash::os_limited::list().unwrap();
+    let ours: Vec<_> = items
+        .into_iter()
+        .filter(|i| i.original_path() == path)
+        .collect();
+    assert!(!ours.is_empty());
+    trash::os_limited::purge_all(ours).unwrap();
+    let gone = engine.undo(None).unwrap();
+    assert_eq!((gone.restored, gone.failed.len()), (0, 1));
+    assert!(
+        gone.failed[0].1.contains("no longer in the Recycle Bin"),
+        "{:?}",
+        gone.failed
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Deleting must never remove the last good copy.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn refuses_to_delete_when_the_copy_to_keep_has_vanished() {
+    let (_dir, mut engine, victim, victim_path, keep) = twin_files();
+    let keep_path = engine
+        .groups()
+        .unwrap()
+        .remove(0)
+        .members
+        .into_iter()
+        .find(|m| m.file.id == keep)
+        .unwrap()
+        .file
+        .path;
+
+    // The kept copy is removed outside DupeLens after the scan (the database still lists it).
+    std::fs::remove_file(&keep_path).unwrap();
+    let err = engine.delete(&[victim], DeleteMode::Permanent).unwrap_err();
+    assert!(
+        matches!(&err, Error::DeletionRefused(why) if why.contains("rescan")),
+        "{err:?}"
+    );
+    assert!(victim_path.exists(), "the last copy must survive");
+}
+
+#[test]
+fn refuses_to_delete_when_the_copy_to_keep_was_modified() {
+    let (_dir, mut engine, victim, victim_path, keep) = twin_files();
+    let keep_path = engine
+        .groups()
+        .unwrap()
+        .remove(0)
+        .members
+        .into_iter()
+        .find(|m| m.file.id == keep)
+        .unwrap()
+        .file
+        .path;
+    // Same name, different contents and size since the scan.
+    std::fs::write(&keep_path, b"edited since the scan").unwrap();
+    assert!(engine.delete(&[victim], DeleteMode::Permanent).is_err());
+    assert!(victim_path.exists());
+}
+
+#[test]
+fn deleting_still_works_when_another_copy_is_intact() {
+    // Three identical files: removing one outside DupeLens leaves two good ones, so deleting
+    // one of them is fine as long as a good copy stays.
+    let dir = tempfile::tempdir().unwrap();
+    let data = filler(8_000, 2);
+    for sub in ["a", "b", "c"] {
+        write(&dir.path().join(sub).join("f.bin"), &data);
+    }
+    let mut engine = engine_with_folder(dir.path());
+    engine.scan(&|_| {}).unwrap();
+    let g = engine.groups().unwrap().remove(0);
+    let mut others = g.members.iter().filter(|m| m.file.id != g.recommended_id);
+    let (gone, target) = (others.next().unwrap(), others.next().unwrap());
+    std::fs::remove_file(&gone.file.path).unwrap(); // vanished, but the kept copy is fine
+    let report = engine
+        .delete(&[target.file.id], DeleteMode::Permanent)
+        .unwrap();
+    assert_eq!(report.deleted, vec![target.file.id]);
+}

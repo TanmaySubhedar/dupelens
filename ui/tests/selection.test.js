@@ -57,3 +57,16 @@ test('a reload never leaves every copy marked', () => {
   s.load([group(1, 2, 2, 3)], { keepPrevious: true });
   assert.deepEqual([...s.marked.get(1)], [3]);
 });
+
+test('a tentative group starts with nothing marked, and Keep recommended leaves it that way', () => {
+  const sure = group(1, 1, 1, 2);
+  const maybe = { ...group(3, 3, 3, 4), tentative: true };
+  const s = new Selection([sure, maybe]);
+  assert.deepEqual([...s.markedIn(sure)], [2]);
+  assert.equal(s.markedIn(maybe).size, 0, 'the user decides on a Maybe group');
+  // The user can still mark it by hand.
+  assert.equal(s.toggle(maybe, 4), true);
+  assert.deepEqual([...s.markedIn(maybe)], [4]);
+  s.keepRecommended();
+  assert.equal(s.markedIn(maybe).size, 0);
+});

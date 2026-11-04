@@ -10,6 +10,7 @@ pub mod db;
 pub mod error;
 pub mod grouping;
 pub mod hashing;
+pub mod matching;
 pub mod metadata;
 pub mod model;
 pub mod recommend;
@@ -18,6 +19,7 @@ pub mod service;
 
 pub use error::{Error, Result};
 pub use grouping::GroupingConfig;
+pub use matching::{MatchingSettings, Preset};
 pub use model::{DuplicateGroup, FileRecord, GroupKind, GroupMember};
 pub use scanner::ScanOptions;
 
@@ -26,7 +28,7 @@ use rusqlite::Connection;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,8 +41,25 @@ pub enum ScanPhase {
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct ScanProgress {
     pub phase: ScanPhase,
+    /// Files finished and files to do, in this phase.
     pub done: usize,
     pub total: usize,
+    /// Bytes read and bytes to read, while analysing. A single huge file moves this bar even
+    /// though `done` stays put until it is finished.
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+}
+
+impl ScanProgress {
+    fn new(phase: ScanPhase, done: usize, total: usize) -> Self {
+        Self {
+            phase,
+            done,
+            total,
+            bytes_done: 0,
+            bytes_total: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -56,6 +75,9 @@ pub struct ScanSummary {
     pub bytes_read: u64,
     /// Cloud-only files (e.g. OneDrive "Files On-Demand") left alone so they are not downloaded.
     pub cloud_only_skipped: usize,
+    /// Extra names for a file already in the list (hard links). Deleting one would free no
+    /// space, so they are left out rather than shown as duplicates.
+    pub hard_links_skipped: usize,
     /// Files whose cached analysis was reused because size and mtime were unchanged.
     pub files_unchanged: usize,
     /// Database entries removed because the file no longer exists in a selected folder.
@@ -77,6 +99,62 @@ pub struct DeleteReport {
     pub deleted: Vec<i64>,
     pub failed: Vec<(i64, String)>,
     pub bytes_freed: u64,
+    /// Identifies this delete action in the history, for [`Engine::undo`]. `None` if nothing
+    /// was deleted.
+    pub batch: Option<i64>,
+}
+
+/// One delete action, as remembered in the history.
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchInfo {
+    pub id: i64,
+    /// When it happened, in whole seconds since the Unix epoch.
+    pub at: i64,
+    pub files: usize,
+    pub bytes: u64,
+    /// In the Recycle Bin, so [`Engine::undo`] can bring it back.
+    pub restorable: bool,
+}
+
+/// What the user has cleaned up so far. Stored only in the local database.
+#[derive(Debug, Clone, Serialize)]
+pub struct Stats {
+    /// Total size of everything deleted and not restored. Counts files moved to the Recycle
+    /// Bin; the space only returns when the bin is emptied.
+    pub bytes_freed: u64,
+    pub files_deleted: usize,
+    pub last_cleaned: Option<i64>,
+    /// The most recent delete action that has not been undone.
+    pub last_batch: Option<BatchInfo>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RestoreReport {
+    pub restored: usize,
+    pub bytes: u64,
+    /// Files that could not be restored, with a plain-language reason.
+    pub failed: Vec<(PathBuf, String)>,
+}
+
+/// Whether [`Engine::undo`] works on this platform (Windows and Linux; not macOS).
+pub const fn undo_supported() -> bool {
+    cfg!(any(
+        target_os = "windows",
+        all(
+            unix,
+            not(any(
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "android"
+            ))
+        )
+    ))
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 /// Version of [`hashing::local_difference`]; bump when its algorithm changes so cached
@@ -105,6 +183,7 @@ pub struct Engine {
     conn: Connection,
     pub grouping: GroupingConfig,
     pub scan_options: ScanOptions,
+    matching_preset: Preset,
 }
 
 impl Engine {
@@ -112,19 +191,99 @@ impl Engine {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
         }
-        Ok(Self {
-            conn: db::open(db_path)?,
-            grouping: GroupingConfig::default(),
-            scan_options: ScanOptions::default(),
-        })
+        Self::with_connection(db::open(db_path)?)
     }
 
     pub fn open_in_memory() -> Result<Self> {
-        Ok(Self {
-            conn: db::open_in_memory()?,
+        Self::with_connection(db::open_in_memory()?)
+    }
+
+    fn with_connection(conn: Connection) -> Result<Self> {
+        let mut engine = Self {
+            conn,
             grouping: GroupingConfig::default(),
             scan_options: ScanOptions::default(),
-        })
+            matching_preset: Preset::Balanced,
+        };
+        engine.load_settings()?;
+        Ok(engine)
+    }
+
+    /// Restores the saved matching and scan settings (the defaults on a fresh database).
+    fn load_settings(&mut self) -> Result<()> {
+        let get = |key: &str| db::get_setting(&self.conn, key);
+        let preset = get("matching.preset")?
+            .and_then(|k| Preset::from_key(&k))
+            .unwrap_or(Preset::Balanced);
+        let defaults = GroupingConfig::default();
+        let number = |key: &str| -> Result<Option<f64>> {
+            Ok(get(key)?.and_then(|v| v.parse::<f64>().ok()))
+        };
+        let settings = if preset == Preset::Custom {
+            MatchingSettings::custom(GroupingConfig {
+                phash_max: number("matching.phash_max")?.map_or(defaults.phash_max, |v| v as u32),
+                dhash_max: number("matching.dhash_max")?.map_or(defaults.dhash_max, |v| v as u32),
+                aspect_tolerance: number("matching.aspect_tolerance")?
+                    .unwrap_or(defaults.aspect_tolerance),
+                max_local_difference: number("matching.max_local_difference")?
+                    .unwrap_or(defaults.max_local_difference),
+                look_alikes: true,
+            })
+            // A damaged or hand-edited value falls back to the default rather than blocking.
+            .unwrap_or_default()
+        } else {
+            MatchingSettings::preset(preset)
+        };
+        self.grouping = settings.config;
+        self.matching_preset = settings.preset;
+        if let Some(min) = get("scan.min_size")?.and_then(|v| v.parse().ok()) {
+            self.scan_options.min_size = min;
+        }
+        Ok(())
+    }
+
+    /// The current matching setting.
+    pub fn matching(&self) -> MatchingSettings {
+        MatchingSettings {
+            preset: self.matching_preset,
+            config: self.grouping,
+        }
+    }
+
+    /// Changes and saves the matching setting. Takes effect on the next [`Engine::groups`];
+    /// no rescan is needed.
+    pub fn set_matching(&mut self, settings: MatchingSettings) -> Result<()> {
+        // Custom values are checked here too, so no caller can store an out-of-range set.
+        let settings = if settings.preset == Preset::Custom {
+            MatchingSettings::custom(settings.config)?
+        } else {
+            MatchingSettings::preset(settings.preset)
+        };
+        let c = &settings.config;
+        let tx = self.conn.transaction()?;
+        for (key, value) in [
+            ("matching.preset", settings.preset.key().to_string()),
+            ("matching.phash_max", c.phash_max.to_string()),
+            ("matching.dhash_max", c.dhash_max.to_string()),
+            ("matching.aspect_tolerance", c.aspect_tolerance.to_string()),
+            (
+                "matching.max_local_difference",
+                c.max_local_difference.to_string(),
+            ),
+        ] {
+            db::set_setting(&tx, key, &value)?;
+        }
+        tx.commit()?;
+        self.grouping = settings.config;
+        self.matching_preset = settings.preset;
+        Ok(())
+    }
+
+    /// Changes and saves what a scan includes. Takes effect on the next scan.
+    pub fn set_scan_options(&mut self, options: ScanOptions) -> Result<()> {
+        db::set_setting(&self.conn, "scan.min_size", &options.min_size.to_string())?;
+        self.scan_options = options;
+        Ok(())
     }
 
     /// Remembers a folder for scanning. Returns the canonical path that was stored.
@@ -171,6 +330,19 @@ impl Engine {
     /// This keeps a library of large videos and music cheap to scan: only real or very likely
     /// duplicates are ever read end to end.
     pub fn scan(&mut self, progress: &(dyn Fn(ScanProgress) + Sync)) -> Result<ScanSummary> {
+        self.scan_cancellable(progress, &AtomicBool::new(false))
+    }
+
+    /// [`Engine::scan`] that stops once `cancel` is set, returning [`Error::Cancelled`].
+    ///
+    /// Nothing is half-written: everything is saved in one transaction at the end. If the scan
+    /// is cancelled while reading files, the files already read are saved first (so the next
+    /// scan does not repeat that work), but nothing is forgotten or removed.
+    pub fn scan_cancellable(
+        &mut self,
+        progress: &(dyn Fn(ScanProgress) + Sync),
+        cancel: &AtomicBool,
+    ) -> Result<ScanSummary> {
         let folders = self.folders()?;
         if folders.is_empty() {
             return Err(Error::NoFolders);
@@ -179,12 +351,14 @@ impl Engine {
         let (present, missing): (Vec<_>, Vec<_>) = folders.into_iter().partition(|f| f.is_dir());
         summary.missing_folders = missing;
 
-        progress(ScanProgress {
-            phase: ScanPhase::Discovering,
-            done: 0,
-            total: 0,
-        });
-        let discovery = scanner::discover(&present, &self.scan_options);
+        progress(ScanProgress::new(ScanPhase::Discovering, 0, 0));
+        let mut discovery = scanner::discover_cancellable(&present, &self.scan_options, cancel);
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
+        let (files, hard_links) = scanner::remove_hard_links(std::mem::take(&mut discovery.files));
+        discovery.files = files;
+        summary.hard_links_skipped = hard_links;
         summary.files_found = discovery.files.len();
         summary.cloud_only_skipped = discovery.cloud_only;
         summary.unreadable = discovery.skipped;
@@ -240,11 +414,7 @@ impl Engine {
         }
 
         // Step 2: a cheap fingerprint of every candidate that shares its size with another file.
-        progress(ScanProgress {
-            phase: ScanPhase::Analyzing,
-            done: 0,
-            total: 0,
-        });
+        progress(ScanProgress::new(ScanPhase::Analyzing, 0, 0));
         let fingerprinted: Vec<_> = candidates
             .into_par_iter()
             .map(|(f, id)| {
@@ -252,6 +422,9 @@ impl Engine {
                 (f, id, r)
             })
             .collect();
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
         let mut same_partial: HashMap<(u64, &str), usize> = HashMap::new();
         for (f, _, r) in &fingerprinted {
             if let Ok(h) = r {
@@ -285,35 +458,44 @@ impl Engine {
 
         // Step 3: read in full.
         let total = jobs.len();
+        let bytes_total: u64 = jobs.iter().map(|j| j.file.size).sum();
         let done = AtomicUsize::new(0);
-        progress(ScanProgress {
-            phase: ScanPhase::Analyzing,
-            done: 0,
-            total,
-        });
+        let bytes_done = AtomicU64::new(0);
+        let report = |files_done: usize, bytes: u64| {
+            progress(ScanProgress {
+                phase: ScanPhase::Analyzing,
+                done: files_done,
+                total,
+                bytes_done: bytes,
+                bytes_total,
+            })
+        };
+        report(0, 0);
         let analysed: Vec<_> = jobs
             .into_par_iter()
             .map(|job| {
+                if cancel.load(Ordering::Relaxed) {
+                    return (job, Err(std::io::ErrorKind::Interrupted.into()));
+                }
                 let result = if job.photo {
-                    metadata::analyze(&job.file.path, job.file.size)
+                    let r = metadata::analyze(&job.file.path, job.file.size);
+                    bytes_done.fetch_add(job.file.size, Ordering::Relaxed);
+                    r
                 } else {
-                    metadata::analyze_plain(&job.file.path)
+                    metadata::analyze_plain(&job.file.path, &mut |n| {
+                        let b = bytes_done.fetch_add(n, Ordering::Relaxed) + n;
+                        report(done.load(Ordering::Relaxed), b);
+                        !cancel.load(Ordering::Relaxed)
+                    })
                 };
                 let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-                progress(ScanProgress {
-                    phase: ScanPhase::Analyzing,
-                    done: n,
-                    total,
-                });
+                report(n, bytes_done.load(Ordering::Relaxed));
                 (job, result)
             })
             .collect();
+        let cancelled = cancel.load(Ordering::Relaxed);
 
-        progress(ScanProgress {
-            phase: ScanPhase::Saving,
-            done: 0,
-            total: 0,
-        });
+        progress(ScanProgress::new(ScanPhase::Saving, 0, 0));
         let tx = self.conn.transaction()?;
         let scan_id = db::next_scan_id(&tx)?;
         for id in seen_ids {
@@ -339,8 +521,16 @@ impl Engine {
                     summary.files_analyzed += 1;
                     summary.bytes_read += job.file.size;
                 }
+                // A read stopped by our own cancel is not a problem with the file. A genuine
+                // error of the same kind (no cancel requested) is reported like any other.
+                Err(e) if cancelled && e.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(_) => summary.unreadable.push(job.file.path),
             }
+        }
+        if cancelled {
+            // Keep what was read, but forget nothing: files not reached yet look "unseen".
+            tx.commit()?;
+            return Err(Error::Cancelled);
         }
         summary.files_removed = db::prune_unseen(&tx, scan_id)?;
         db::prune_local_differences(&tx, LOCAL_DIFFERENCE_METHOD)?;
@@ -353,6 +543,17 @@ impl Engine {
     /// Look-alike candidates are compared pixel by pixel (reading the two files) the first
     /// time they meet; the score is cached, so later calls only read the database.
     pub fn groups(&self) -> Result<Vec<DuplicateGroup>> {
+        self.groups_cancellable(&|_, _| {}, &AtomicBool::new(false))
+    }
+
+    /// [`Engine::groups`] with progress (`done`, `total` look-alike pairs compared) and
+    /// cancellation, which returns [`Error::Cancelled`]. Scores computed before a cancel are
+    /// kept, so running it again carries on where it stopped.
+    pub fn groups_cancellable(
+        &self,
+        progress: &(dyn Fn(usize, usize) + Sync),
+        cancel: &AtomicBool,
+    ) -> Result<Vec<DuplicateGroup>> {
         let files = db::all_files(&self.conn)?;
         let key = |a: &FileRecord, b: &FileRecord| {
             let (x, y) = db::ordered(&a.sha256, &b.sha256);
@@ -372,9 +573,15 @@ impl Engine {
                 None => missing.push((i, j, k)),
             }
         }
+        let total = missing.len();
+        let compared = AtomicUsize::new(0);
+        progress(0, total);
         let computed: Vec<_> = missing
             .into_par_iter()
             .map(|(i, j, k)| {
+                if cancel.load(Ordering::Relaxed) {
+                    return (k, None);
+                }
                 // Unreadable or undecodable right now (e.g. file moved): no score, no match.
                 let score = match (
                     metadata::load_gray(&files[i].path),
@@ -383,6 +590,7 @@ impl Engine {
                     (Ok(Some(a)), Ok(Some(b))) => Some(hashing::local_difference(&a, &b)),
                     _ => None,
                 };
+                progress(compared.fetch_add(1, Ordering::Relaxed) + 1, total);
                 (k, score)
             })
             .collect();
@@ -391,6 +599,9 @@ impl Engine {
                 db::store_local_difference(&self.conn, &k.0, &k.1, LOCAL_DIFFERENCE_METHOD, score)?;
                 scores.insert(k, score);
             }
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
         }
 
         Ok(grouping::build_groups(
@@ -426,9 +637,25 @@ impl Engine {
         }
 
         for g in self.groups()? {
+            if !g.members.iter().any(|m| requested.contains(&m.file.id)) {
+                continue;
+            }
             if g.members.iter().all(|m| requested.contains(&m.file.id)) {
                 return Err(Error::DeletionRefused(format!(
                     "this would delete every copy in group {} (keep at least one)",
+                    g.id
+                )));
+            }
+            // The database says a copy stays, but it may have been removed or changed since the
+            // scan (for instance after a cancelled scan, which forgets nothing). Deleting the
+            // others would then destroy the last good copy.
+            if !g
+                .members
+                .iter()
+                .any(|m| !requested.contains(&m.file.id) && unchanged_on_disk(&m.file))
+            {
+                return Err(Error::DeletionRefused(format!(
+                    "the copy that would be kept in group {} has changed or is missing since the last scan; rescan first",
                     g.id
                 )));
             }
@@ -436,15 +663,82 @@ impl Engine {
 
         let folders = self.folders()?;
         let mut report = DeleteReport::default();
+        let batch = db::next_batch_id(&self.conn)?;
+        let at = now_secs();
         files.sort_by_key(|f| f.id);
         for f in files {
             match self.delete_one(&f, &folders, mode) {
                 Ok(()) => {
-                    db::delete_file_row(&self.conn, f.id)?;
+                    // The file is gone. Whatever happens to the bookkeeping, the report must say
+                    // so: a stale database row is dropped by the next scan, and a missing history
+                    // entry only means this file cannot be undone.
                     report.bytes_freed += f.size;
                     report.deleted.push(f.id);
+                    let _ = db::delete_file_row(&self.conn, f.id);
+                    let _ = db::record_deletion(
+                        &self.conn,
+                        batch,
+                        at,
+                        &f.path,
+                        f.size,
+                        mode == DeleteMode::Trash,
+                    );
                 }
                 Err(why) => report.failed.push((f.id, why)),
+            }
+        }
+        if !report.deleted.is_empty() {
+            report.batch = Some(batch);
+        }
+        Ok(report)
+    }
+
+    /// What has been cleaned up so far, and the last delete action.
+    pub fn stats(&self) -> Result<Stats> {
+        let (bytes_freed, files_deleted, last_cleaned) = db::deletion_totals(&self.conn)?;
+        Ok(Stats {
+            bytes_freed,
+            files_deleted,
+            last_cleaned,
+            last_batch: db::last_batch(&self.conn)?.map(|b| BatchInfo {
+                id: b.batch,
+                at: b.at,
+                files: b.files,
+                bytes: b.bytes,
+                restorable: b.trash && undo_supported(),
+            }),
+        })
+    }
+
+    /// Puts the files of a delete action back from the Recycle Bin (the latest action that was
+    /// not undone, if `batch` is `None`). Files that cannot be restored (the bin was emptied,
+    /// or something now occupies the path) are reported, not treated as an error. The caller
+    /// should rescan afterwards.
+    pub fn undo(&mut self, batch: Option<i64>) -> Result<RestoreReport> {
+        if !undo_supported() {
+            return Err(Error::UndoUnavailable(
+                "restoring from the Recycle Bin is not supported on this system; restore the files from it by hand".into(),
+            ));
+        }
+        let info = match batch {
+            Some(b) => db::batch(&self.conn, b)?,
+            None => db::last_batch(&self.conn)?,
+        }
+        .ok_or_else(|| Error::UndoUnavailable("there is nothing to restore".into()))?;
+        if !info.trash {
+            return Err(Error::UndoUnavailable(
+                "those files were deleted permanently, so they cannot be restored".into(),
+            ));
+        }
+        let mut report = RestoreReport::default();
+        for (row, path) in db::restorable_files(&self.conn, info.batch)? {
+            match restore_from_trash(&path, info.at) {
+                Ok(()) => {
+                    db::mark_restored(&self.conn, row)?;
+                    report.restored += 1;
+                    report.bytes += std::fs::metadata(&path).map_or(0, |m| m.len());
+                }
+                Err(why) => report.failed.push((path, why)),
             }
         }
         Ok(report)
@@ -490,6 +784,45 @@ fn canonical_folder(folder: &Path) -> std::io::Result<PathBuf> {
         }
     }
     Ok(canonical)
+}
+
+/// Whether a file is still there with the size and modified time recorded by the last scan.
+fn unchanged_on_disk(f: &FileRecord) -> bool {
+    std::fs::symlink_metadata(&f.path)
+        .is_ok_and(|m| m.is_file() && m.len() == f.size && scanner::mtime_ns(&m) == f.mtime_ns)
+}
+
+/// Brings one file back from the OS trash to where it was deleted from.
+#[cfg(any(
+    target_os = "windows",
+    all(
+        unix,
+        not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+    )
+))]
+fn restore_from_trash(path: &Path, deleted_at: i64) -> std::result::Result<(), String> {
+    if path.exists() {
+        return Err("something is already at that path".into());
+    }
+    let items = trash::os_limited::list().map_err(|e| e.to_string())?;
+    // The newest bin entry for that path from this delete action (allowing for clock rounding).
+    let item = items
+        .into_iter()
+        .filter(|i| i.original_path() == path && i.time_deleted >= deleted_at - 10)
+        .max_by_key(|i| i.time_deleted)
+        .ok_or("it is no longer in the Recycle Bin (it may have been emptied)")?;
+    trash::os_limited::restore_all([item]).map_err(|e| e.to_string())
+}
+
+#[cfg(not(any(
+    target_os = "windows",
+    all(
+        unix,
+        not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+    )
+)))]
+fn restore_from_trash(_path: &Path, _deleted_at: i64) -> std::result::Result<(), String> {
+    Err("restoring is not supported on this system".into())
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]

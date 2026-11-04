@@ -64,6 +64,9 @@ pub struct DuplicateGroup {
     /// Stable for a given set of files: the smallest member file id.
     pub id: i64,
     pub kind: GroupKind,
+    /// Found only because the matching setting is looser than Balanced. Should be reviewed,
+    /// not deleted by default.
+    pub tentative: bool,
     pub members: Vec<GroupMember>,
     /// File id of the copy the engine suggests keeping. Advisory only.
     pub recommended_id: i64,

@@ -5,8 +5,12 @@
 // copy is marked. Nothing is deleted until the user confirms on the review screen, and the
 // engine re-checks every rule (decision 0006) no matter what the UI sends.
 
-/** "Keep Recommended": every member except the recommended one. */
+/**
+ * "Keep Recommended": every member except the recommended one. A tentative group (found only
+ * because matching is set looser than Balanced) starts with nothing marked: the user decides.
+ */
 export function defaultDeletion(group) {
+  if (group.tentative) return new Set();
   return new Set(group.members.map((m) => m.id).filter((id) => id !== group.recommended_id));
 }
 
