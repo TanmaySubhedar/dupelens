@@ -99,6 +99,62 @@ pub struct DeleteReport {
     pub deleted: Vec<i64>,
     pub failed: Vec<(i64, String)>,
     pub bytes_freed: u64,
+    /// Identifies this delete action in the history, for [`Engine::undo`]. `None` if nothing
+    /// was deleted.
+    pub batch: Option<i64>,
+}
+
+/// One delete action, as remembered in the history.
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchInfo {
+    pub id: i64,
+    /// When it happened, in whole seconds since the Unix epoch.
+    pub at: i64,
+    pub files: usize,
+    pub bytes: u64,
+    /// In the Recycle Bin, so [`Engine::undo`] can bring it back.
+    pub restorable: bool,
+}
+
+/// What the user has cleaned up so far. Stored only in the local database.
+#[derive(Debug, Clone, Serialize)]
+pub struct Stats {
+    /// Total size of everything deleted and not restored. Counts files moved to the Recycle
+    /// Bin; the space only returns when the bin is emptied.
+    pub bytes_freed: u64,
+    pub files_deleted: usize,
+    pub last_cleaned: Option<i64>,
+    /// The most recent delete action that has not been undone.
+    pub last_batch: Option<BatchInfo>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RestoreReport {
+    pub restored: usize,
+    pub bytes: u64,
+    /// Files that could not be restored, with a plain-language reason.
+    pub failed: Vec<(PathBuf, String)>,
+}
+
+/// Whether [`Engine::undo`] works on this platform (Windows and Linux; not macOS).
+pub const fn undo_supported() -> bool {
+    cfg!(any(
+        target_os = "windows",
+        all(
+            unix,
+            not(any(
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "android"
+            ))
+        )
+    ))
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 /// Version of [`hashing::local_difference`]; bump when its algorithm changes so cached
@@ -581,15 +637,79 @@ impl Engine {
 
         let folders = self.folders()?;
         let mut report = DeleteReport::default();
+        let batch = db::next_batch_id(&self.conn)?;
+        let at = now_secs();
         files.sort_by_key(|f| f.id);
         for f in files {
             match self.delete_one(&f, &folders, mode) {
                 Ok(()) => {
                     db::delete_file_row(&self.conn, f.id)?;
+                    db::record_deletion(
+                        &self.conn,
+                        batch,
+                        at,
+                        &f.path,
+                        f.size,
+                        mode == DeleteMode::Trash,
+                    )?;
                     report.bytes_freed += f.size;
                     report.deleted.push(f.id);
                 }
                 Err(why) => report.failed.push((f.id, why)),
+            }
+        }
+        if !report.deleted.is_empty() {
+            report.batch = Some(batch);
+        }
+        Ok(report)
+    }
+
+    /// What has been cleaned up so far, and the last delete action.
+    pub fn stats(&self) -> Result<Stats> {
+        let (bytes_freed, files_deleted, last_cleaned) = db::deletion_totals(&self.conn)?;
+        Ok(Stats {
+            bytes_freed,
+            files_deleted,
+            last_cleaned,
+            last_batch: db::last_batch(&self.conn)?.map(|b| BatchInfo {
+                id: b.batch,
+                at: b.at,
+                files: b.files,
+                bytes: b.bytes,
+                restorable: b.trash && undo_supported(),
+            }),
+        })
+    }
+
+    /// Puts the files of a delete action back from the Recycle Bin (the latest action that was
+    /// not undone, if `batch` is `None`). Files that cannot be restored (the bin was emptied,
+    /// or something now occupies the path) are reported, not treated as an error. The caller
+    /// should rescan afterwards.
+    pub fn undo(&mut self, batch: Option<i64>) -> Result<RestoreReport> {
+        if !undo_supported() {
+            return Err(Error::UndoUnavailable(
+                "restoring from the Recycle Bin is not supported on this system; restore the files from it by hand".into(),
+            ));
+        }
+        let info = match batch {
+            Some(b) => db::batch(&self.conn, b)?,
+            None => db::last_batch(&self.conn)?,
+        }
+        .ok_or_else(|| Error::UndoUnavailable("there is nothing to restore".into()))?;
+        if !info.trash {
+            return Err(Error::UndoUnavailable(
+                "those files were deleted permanently, so they cannot be restored".into(),
+            ));
+        }
+        let mut report = RestoreReport::default();
+        for (row, path) in db::restorable_files(&self.conn, info.batch)? {
+            match restore_from_trash(&path, info.at) {
+                Ok(()) => {
+                    db::mark_restored(&self.conn, row)?;
+                    report.restored += 1;
+                    report.bytes += std::fs::metadata(&path).map_or(0, |m| m.len());
+                }
+                Err(why) => report.failed.push((path, why)),
             }
         }
         Ok(report)
@@ -635,6 +755,39 @@ fn canonical_folder(folder: &Path) -> std::io::Result<PathBuf> {
         }
     }
     Ok(canonical)
+}
+
+/// Brings one file back from the OS trash to where it was deleted from.
+#[cfg(any(
+    target_os = "windows",
+    all(
+        unix,
+        not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+    )
+))]
+fn restore_from_trash(path: &Path, deleted_at: i64) -> std::result::Result<(), String> {
+    if path.exists() {
+        return Err("something is already at that path".into());
+    }
+    let items = trash::os_limited::list().map_err(|e| e.to_string())?;
+    // The newest bin entry for that path from this delete action (allowing for clock rounding).
+    let item = items
+        .into_iter()
+        .filter(|i| i.original_path() == path && i.time_deleted >= deleted_at - 10)
+        .max_by_key(|i| i.time_deleted)
+        .ok_or("it is no longer in the Recycle Bin (it may have been emptied)")?;
+    trash::os_limited::restore_all([item]).map_err(|e| e.to_string())
+}
+
+#[cfg(not(any(
+    target_os = "windows",
+    all(
+        unix,
+        not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+    )
+)))]
+fn restore_from_trash(_path: &Path, _deleted_at: i64) -> std::result::Result<(), String> {
+    Err("restoring is not supported on this system".into())
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]

@@ -21,6 +21,7 @@ const state = {
   shown: GROUPS_PER_PAGE,
   lastSummary: null,
   settings: null,
+  suggested: [],
 };
 
 // ---------- small shared pieces ----------
@@ -82,10 +83,22 @@ async function showFolders() {
   try {
     state.folders = await call('folders');
     state.settings = await call('get_settings');
+    state.suggested = await call('suggested_folders').catch(() => []);
   } catch (e) {
     showError(e);
   }
   renderFolders();
+}
+
+/** First run: one-click suggestions for the folders most people want cleaned. */
+function suggestionsSection() {
+  const chosen = new Set(state.folders.map((f) => f.toLowerCase()));
+  const left = state.suggested.filter((s) => !chosen.has(s.path.toLowerCase()));
+  if (state.folders.length > 0 || left.length === 0) return null;
+  return h('div', { class: 'suggestions' },
+    h('p', { class: 'muted small' }, 'Quick start: add the folders where duplicates usually build up.'),
+    h('div', { class: 'chips' }, left.map((s) =>
+      h('button', { class: 'secondary', title: s.path, onclick: (e) => busy(e.currentTarget, () => addFolder(s.path)) }, `+ ${s.name}`))));
 }
 
 /** "How alike must files be?": the matching preset. Changing it regroups without rescanning. */
@@ -142,6 +155,7 @@ function renderFolders() {
       h('div', { class: 'folder-actions' },
         h('button', { class: 'primary', onclick: (e) => busy(e.currentTarget, chooseFolder) }, '+ Choose folder…'),
       ),
+      suggestionsSection(),
       h('div', { class: 'path-row' }, pathInput, addButton),
       state.folders.length === 0
         ? h('p', { class: 'empty' }, 'No folders yet.')
@@ -477,20 +491,33 @@ function trashName() {
 async function doDelete(ids, permanent) {
   const report = await call('delete', { ids, permanent });
   await loadGroups({ keepPrevious: true });
-  showDone(report, permanent);
+  const stats = await call('stats').catch(() => null);
+  showDone(report, permanent, stats);
 }
 
-function showDone(report, permanent) {
+/** Puts the last delete action back from the Recycle Bin, then rescans so the files show again. */
+async function undoLast(batch) {
+  const r = await call('undo', { batch });
+  const failed = r.failed.length ? ` ${plural(r.failed.length, 'file')} could not be restored: ${r.failed[0].reason}.` : '';
+  toast(`Restored ${plural(r.restored, 'file')}.${failed}`, r.failed.length ? 'warn' : 'info');
+  await startScan();
+}
+
+function showDone(report, permanent, stats) {
   const where = permanent ? 'deleted permanently' : `moved to the ${trashName()}`;
+  const canUndo = !permanent && state.info.undo_supported && report.batch != null && report.deleted.length > 0;
   mount(main, h('section', { class: 'card narrow center' },
     h('div', { class: 'big-emoji', 'aria-hidden': 'true' }, report.failed.length ? '⚠️' : '✅'),
     h('h1', {}, `${plural(report.deleted.length, 'file')} ${where}`),
     h('p', { class: 'lead' }, `${formatBytes(report.bytes_freed)} freed.`),
+    !permanent && h('p', { class: 'muted small' }, `Disk space returns when you empty the ${trashName()}. Until then you can restore these files.`),
+    stats && stats.bytes_freed > 0 && h('p', { class: 'muted' }, `Freed so far with DupeLens: ${formatBytes(stats.bytes_freed)} (${plural(stats.files_deleted, 'file')}).`),
     report.failed.length > 0 && h('div', { class: 'failures' },
       h('p', {}, `${plural(report.failed.length, 'file was', 'files were')} skipped and left untouched:`),
       h('ul', {}, report.failed.map((f) => h('li', {}, h('span', { class: 'name' }, f.path || `File ${f.id}`), ` — ${f.reason}`)))),
     h('div', { class: 'review-buttons' },
       state.groups.length > 0 && h('button', { class: 'primary', onclick: showResults }, `Continue with ${plural(state.groups.length, 'remaining group')}`),
+      canUndo && h('button', { class: 'secondary', onclick: (e) => busy(e.currentTarget, () => undoLast(report.batch)) }, `Undo: restore ${plural(report.deleted.length, 'file')}`),
       h('button', { class: 'secondary', onclick: showFolders }, 'Back to folders')),
   ));
 }

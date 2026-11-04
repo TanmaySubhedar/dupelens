@@ -237,6 +237,20 @@ pub struct UiDeleteReport {
     pub deleted: Vec<i64>,
     pub failed: Vec<UiDeleteFailure>,
     pub bytes_freed: u64,
+    /// The history entry for this action; pass it to `undo`. `None` if nothing was deleted.
+    pub batch: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UiRestoreReport {
+    pub restored: usize,
+    pub bytes: u64,
+    pub failed: Vec<UiDeleteFailure>,
+}
+
+#[derive(Deserialize)]
+struct UndoArgs {
+    batch: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -378,6 +392,7 @@ impl Service {
             "info" => Ok(json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "trash_supported": crate::trash_supported(),
+                "undo_supported": crate::undo_supported(),
                 "platform": std::env::consts::OS,
             })),
             "folders" => to_value(self.folders()?),
@@ -390,6 +405,8 @@ impl Service {
             "set_settings" => to_value(self.set_settings(args(a)?)?),
             "scan_status" => to_value(self.scan_status()),
             "groups" => to_value(&*self.groups()?),
+            "stats" => to_value(self.engine()?.stats()?),
+            "undo" => to_value(self.undo(args::<UndoArgs>(a)?.batch)?),
             "delete" => {
                 let d: DeleteArgs = args(a)?;
                 to_value(self.delete(&d.ids, d.permanent)?)
@@ -703,6 +720,27 @@ impl Service {
                 })
                 .collect(),
             bytes_freed: report.bytes_freed,
+            batch: report.batch,
+        })
+    }
+
+    /// Restores a delete action from the Recycle Bin (the last one if `batch` is `None`), then
+    /// drops the cached results: the page should rescan to see the files again.
+    pub fn undo(&self, batch: Option<i64>) -> Result<UiRestoreReport, ApiError> {
+        let report = self.engine()?.undo(batch)?;
+        self.clear_results();
+        Ok(UiRestoreReport {
+            restored: report.restored,
+            bytes: report.bytes,
+            failed: report
+                .failed
+                .into_iter()
+                .map(|(path, reason)| UiDeleteFailure {
+                    id: 0,
+                    path: path.to_string_lossy().into_owned(),
+                    reason,
+                })
+                .collect(),
         })
     }
 
@@ -954,6 +992,53 @@ mod tests {
                 .len()
                 == 4
         );
+    }
+
+    #[test]
+    fn stats_and_undo_through_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        for sub in ["a", "b"] {
+            std::fs::create_dir_all(dir.path().join(sub)).unwrap();
+            std::fs::write(dir.path().join(sub).join("doc.bin"), vec![7u8; 5000]).unwrap();
+        }
+        let s = Service::new(Engine::open_in_memory().unwrap());
+        s.call(
+            "add_folder",
+            json!({ "path": dir.path().to_str().unwrap() }),
+        )
+        .unwrap();
+        scan_to_done(&s);
+
+        let info = s.call("info", Value::Null).unwrap();
+        assert_eq!(info["undo_supported"], json!(crate::undo_supported()));
+        assert_eq!(s.call("stats", Value::Null).unwrap()["files_deleted"], 0);
+
+        let groups = s.call("groups", Value::Null).unwrap();
+        let keep = groups[0]["recommended_id"].as_i64().unwrap();
+        let victim = groups[0]["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_i64().unwrap())
+            .find(|&id| id != keep)
+            .unwrap();
+        let report = s
+            .call("delete", json!({ "ids": [victim], "permanent": true }))
+            .unwrap();
+        assert_eq!(report["batch"], 1);
+        let stats = s.call("stats", Value::Null).unwrap();
+        assert_eq!(
+            (
+                stats["bytes_freed"].as_u64(),
+                stats["files_deleted"].as_u64()
+            ),
+            (Some(5000), Some(1))
+        );
+        assert_eq!(stats["last_batch"]["restorable"], false);
+        // A permanent delete cannot be undone, and says why.
+        let err = s.call("undo", json!({})).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Failed);
+        assert!(err.message.contains("permanently"), "{}", err.message);
     }
 
     #[test]

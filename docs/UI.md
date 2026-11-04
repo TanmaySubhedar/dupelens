@@ -29,7 +29,7 @@ refused deletion). `message` is plain language, ready to show.
 
 | Command | Arguments | Result |
 |---|---|---|
-| `info` | – | `{ version, trash_supported, platform }` |
+| `info` | – | `{ version, trash_supported, undo_supported, platform }` |
 | `folders` | – | `["C:\\Photos", ...]` |
 | `add_folder` | `{ path }` | the stored (canonical) path |
 | `remove_folder` | `{ path }` | `true` if it was selected |
@@ -40,8 +40,11 @@ refused deletion). `message` is plain language, ready to show.
 | `get_settings` | – | `{ preset, config, min_size, presets: [{ key, name, description, config }] }` |
 | `set_settings` | `{ preset?, custom?, min_size? }` | the new settings. Drops the cached results: call `start_regroup` after a matching change; a changed `min_size` needs a new scan |
 | `groups` | – | duplicate groups from the last scan (cached) |
-| `delete` | `{ ids, permanent }` | `{ deleted, failed: [{ id, path, reason }], bytes_freed }` |
+| `delete` | `{ ids, permanent }` | `{ deleted, failed: [{ id, path, reason }], bytes_freed, batch }`. `batch` identifies this action in the history (`null` if nothing was deleted) |
+| `stats` | – | `{ bytes_freed, files_deleted, last_cleaned, last_batch: { id, at, files, bytes, restorable } \| null }`: the lifetime total (not counting anything undone) and the last action |
+| `undo` | `{ batch? }` | `{ restored, bytes, failed: [{ path, reason }] }`. Restores a Recycle Bin delete (the last one if `batch` is omitted). Refused with `failed` for a permanent delete, when there is nothing to undo, and on macOS. The page should rescan afterwards |
 | `pick_folder` * | – | a path, or `null` if cancelled or no dialog is available |
+| `suggested_folders` * | – | `[{ name, path }]`: the user's Pictures, Downloads, Desktop, Documents, Videos and Music folders that exist, for one-click choices on first run |
 | `quit` * | – | `null`, then the app closes |
 
 \* **Host commands.** The app implements these itself in `desktop/src/main.rs`, because they
@@ -210,4 +213,7 @@ These are not in the contract above yet. Each needs a decision record when built
   ([0014](decisions/0014-tunable-matching.md)); the old pages have a basic preset menu, the
   redesign adds the full control and the Advanced values.
 - A "not a duplicate" list.
-- Deletion history and undo for the Recycle Bin, and a local lifetime total.
+- ~~Deletion history and undo for the Recycle Bin, and a local lifetime total~~ Done in the engine
+  and commands ([0015](decisions/0015-deletion-history-and-undo.md)); the old pages have an Undo
+  button and a "freed so far" line, and first-run folder suggestions. The milestone bar and the
+  "found so far" panel during a scan are still to do with the redesign.

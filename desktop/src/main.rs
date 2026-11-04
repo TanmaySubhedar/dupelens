@@ -43,6 +43,27 @@ fn api(
                 .and_then(|p| p.into_path().ok());
             Ok(json!(picked.map(|p| p.to_string_lossy().into_owned())))
         }
+        // The user's standard folders that exist, offered as one-click choices on first run.
+        // Only these well-known locations are listed; nothing is read from them.
+        "suggested_folders" => {
+            let paths = app.path();
+            let candidates = [
+                ("Pictures", paths.picture_dir()),
+                ("Downloads", paths.download_dir()),
+                ("Desktop", paths.desktop_dir()),
+                ("Documents", paths.document_dir()),
+                ("Videos", paths.video_dir()),
+                ("Music", paths.audio_dir()),
+            ];
+            let found: Vec<Value> = candidates
+                .into_iter()
+                .filter_map(|(name, dir)| {
+                    let dir = dir.ok().filter(|d| d.is_dir())?;
+                    Some(json!({ "name": name, "path": dir.to_string_lossy() }))
+                })
+                .collect();
+            Ok(json!(found))
+        }
         "quit" => {
             app.exit(0);
             Ok(Value::Null)

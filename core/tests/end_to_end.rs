@@ -793,3 +793,109 @@ fn a_minimum_size_leaves_small_files_out() {
     engine.scan(&|_| {}).unwrap();
     assert_eq!(engine.groups().unwrap().len(), 1);
 }
+
+// ---------------------------------------------------------------------------------------------
+// History, lifetime totals and undo.
+// ---------------------------------------------------------------------------------------------
+
+/// Two identical 10 KB files; returns the engine and the id and path of the one to delete.
+fn twin_files() -> (tempfile::TempDir, Engine, i64, PathBuf, i64) {
+    let dir = tempfile::tempdir().unwrap();
+    let data = filler(10_000, 6);
+    write(&dir.path().join("keep/doc.pdf"), &data);
+    write(&dir.path().join("extra/doc.pdf"), &data);
+    let mut engine = engine_with_folder(dir.path());
+    engine.scan(&|_| {}).unwrap();
+    let g = engine.groups().unwrap().remove(0);
+    let victim = g
+        .members
+        .iter()
+        .find(|m| m.file.id != g.recommended_id)
+        .unwrap();
+    let (id, path) = (victim.file.id, victim.file.path.clone());
+    (dir, engine, id, path, g.recommended_id)
+}
+
+#[test]
+fn deletions_are_remembered_and_counted() {
+    let (_dir, mut engine, victim, path, _) = twin_files();
+    let before = engine.stats().unwrap();
+    assert_eq!((before.bytes_freed, before.files_deleted), (0, 0));
+    assert!(before.last_batch.is_none() && before.last_cleaned.is_none());
+
+    let report = engine.delete(&[victim], DeleteMode::Permanent).unwrap();
+    assert_eq!(report.batch, Some(1));
+    assert!(!path.exists());
+
+    let stats = engine.stats().unwrap();
+    assert_eq!((stats.bytes_freed, stats.files_deleted), (10_000, 1));
+    assert!(stats.last_cleaned.is_some());
+    let batch = stats.last_batch.unwrap();
+    assert_eq!((batch.id, batch.files, batch.bytes), (1, 1, 10_000));
+    assert!(!batch.restorable, "a permanent delete cannot be undone");
+
+    // And it cannot be undone.
+    assert!(matches!(engine.undo(None), Err(Error::UndoUnavailable(_))));
+}
+
+#[test]
+fn undo_brings_a_file_back_from_the_recycle_bin() {
+    if !dupelens_core::trash_supported() || !dupelens_core::undo_supported() {
+        return;
+    }
+    let (_dir, mut engine, victim, path, _) = twin_files();
+    let report = engine.delete(&[victim], DeleteMode::Trash).unwrap();
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    assert!(!path.exists());
+    let stats = engine.stats().unwrap();
+    assert_eq!(stats.bytes_freed, 10_000);
+    assert!(stats.last_batch.as_ref().unwrap().restorable);
+
+    let restored = engine.undo(None).unwrap();
+    assert!(restored.failed.is_empty(), "{:?}", restored.failed);
+    assert_eq!(restored.restored, 1);
+    assert!(path.exists(), "the file is back where it was");
+    assert_eq!(std::fs::read(&path).unwrap(), filler(10_000, 6));
+
+    // The lifetime total no longer counts it, and there is nothing further to undo.
+    let after = engine.stats().unwrap();
+    assert_eq!((after.bytes_freed, after.files_deleted), (0, 0));
+    assert!(after.last_batch.is_none());
+    assert!(matches!(engine.undo(None), Err(Error::UndoUnavailable(_))));
+
+    // A rescan sees the pair again.
+    engine.scan(&|_| {}).unwrap();
+    assert_eq!(engine.groups().unwrap().len(), 1);
+}
+
+#[test]
+fn undo_reports_a_file_that_left_the_bin_and_one_whose_path_is_taken() {
+    if !dupelens_core::trash_supported() || !dupelens_core::undo_supported() {
+        return;
+    }
+    let (_dir, mut engine, victim, path, _) = twin_files();
+    engine.delete(&[victim], DeleteMode::Trash).unwrap();
+
+    // Something new now sits at the old path: restoring must not overwrite it.
+    std::fs::write(&path, b"someone else's file").unwrap();
+    let blocked = engine.undo(None).unwrap();
+    assert_eq!((blocked.restored, blocked.failed.len()), (0, 1));
+    assert_eq!(std::fs::read(&path).unwrap(), b"someone else's file");
+    std::fs::remove_file(&path).unwrap();
+
+    // The bin was emptied in the meantime.
+    let items = trash::os_limited::list().unwrap();
+    let ours: Vec<_> = items
+        .into_iter()
+        .filter(|i| i.original_path() == path)
+        .collect();
+    assert!(!ours.is_empty());
+    trash::os_limited::purge_all(ours).unwrap();
+    let gone = engine.undo(None).unwrap();
+    assert_eq!((gone.restored, gone.failed.len()), (0, 1));
+    assert!(
+        gone.failed[0].1.contains("no longer in the Recycle Bin"),
+        "{:?}",
+        gone.failed
+    );
+}

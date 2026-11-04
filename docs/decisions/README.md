@@ -28,6 +28,7 @@ are without reading the code or old chats.
 | [0012](0012-tauri-app-is-primary.md) | The Tauri app is the main program; the browser UI becomes a fallback | Accepted | 2026-10-10 |
 | [0013](0013-exact-matching-for-every-file-type.md) | Exact matching for every file type, reading as little as possible | Accepted | 2026-11-04 |
 | [0014](0014-tunable-matching.md) | Tunable matching presets; cancel, byte progress and hard-link detection | Accepted | 2026-11-04 |
+| [0015](0015-deletion-history-and-undo.md) | Deletion history, undo from the Recycle Bin, lifetime total | Accepted | 2026-11-04 |
 
 See also: [ROADMAP](../ROADMAP.md) for what's next and open questions, and
 [PRD-v1](../PRD-v1.md) for the original product requirements.

@@ -51,6 +51,18 @@ fn init(conn: Connection) -> Result<Connection> {
              scan_id   INTEGER NOT NULL
          );
          CREATE INDEX IF NOT EXISTS files_sha256 ON files(sha256);
+         -- Every file the user deleted through DupeLens: for the lifetime total and for undo.
+         -- `trash` is 1 for the Recycle Bin (restorable) and 0 for a permanent delete.
+         CREATE TABLE IF NOT EXISTS deletions (
+             id       INTEGER PRIMARY KEY,
+             batch    INTEGER NOT NULL,
+             at       INTEGER NOT NULL,
+             path     TEXT NOT NULL,
+             size     INTEGER NOT NULL,
+             trash    INTEGER NOT NULL,
+             restored INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE INDEX IF NOT EXISTS deletions_batch ON deletions(batch);
          CREATE TABLE IF NOT EXISTS settings (
              key   TEXT PRIMARY KEY,
              value TEXT NOT NULL
@@ -96,6 +108,105 @@ pub fn folders(conn: &Connection) -> Result<Vec<PathBuf>> {
     Ok(rows
         .map(|r| r.map(PathBuf::from))
         .collect::<rusqlite::Result<_>>()?)
+}
+
+/// A group of files deleted together by one "delete" action.
+#[derive(Debug, Clone)]
+pub struct BatchRow {
+    pub batch: i64,
+    pub at: i64,
+    pub files: usize,
+    pub bytes: u64,
+    /// Whether the files are in the Recycle Bin (so can be restored), not permanently gone.
+    pub trash: bool,
+}
+
+pub fn next_batch_id(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(MAX(batch), 0) + 1 FROM deletions",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
+pub fn record_deletion(
+    conn: &Connection,
+    batch: i64,
+    at: i64,
+    path: &Path,
+    size: u64,
+    trash: bool,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO deletions (batch, at, path, size, trash) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![batch, at, path_str(path), size as i64, trash],
+    )?;
+    Ok(())
+}
+
+/// Totals over everything deleted and not since restored: bytes, files, time of the last one.
+pub fn deletion_totals(conn: &Connection) -> Result<(u64, usize, Option<i64>)> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(SUM(size), 0), COUNT(*), MAX(at) FROM deletions WHERE restored = 0",
+        [],
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)? as u64,
+                r.get::<_, i64>(1)? as usize,
+                r.get(2)?,
+            ))
+        },
+    )?)
+}
+
+fn batch_from_row(r: &Row) -> rusqlite::Result<BatchRow> {
+    Ok(BatchRow {
+        batch: r.get(0)?,
+        at: r.get(1)?,
+        files: r.get::<_, i64>(2)? as usize,
+        bytes: r.get::<_, i64>(3)? as u64,
+        trash: r.get(4)?,
+    })
+}
+
+const BATCH_SELECT: &str = "SELECT batch, MIN(at), COUNT(*), SUM(size), MAX(trash)
+                            FROM deletions WHERE restored = 0";
+
+/// The most recent batch that still has files not restored.
+pub fn last_batch(conn: &Connection) -> Result<Option<BatchRow>> {
+    Ok(conn
+        .query_row(
+            &format!("{BATCH_SELECT} GROUP BY batch ORDER BY batch DESC LIMIT 1"),
+            [],
+            batch_from_row,
+        )
+        .optional()?)
+}
+
+pub fn batch(conn: &Connection, batch: i64) -> Result<Option<BatchRow>> {
+    Ok(conn
+        .query_row(
+            &format!("{BATCH_SELECT} AND batch = ?1 GROUP BY batch"),
+            [batch],
+            batch_from_row,
+        )
+        .optional()?)
+}
+
+/// The not-yet-restored files of a batch that went to the Recycle Bin: (row id, path).
+pub fn restorable_files(conn: &Connection, batch: i64) -> Result<Vec<(i64, PathBuf)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, path FROM deletions WHERE batch = ?1 AND trash = 1 AND restored = 0 ORDER BY id",
+    )?;
+    let rows = stmt.query_map([batch], |r| {
+        Ok((r.get(0)?, PathBuf::from(r.get::<_, String>(1)?)))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub fn mark_restored(conn: &Connection, row_id: i64) -> Result<()> {
+    conn.execute("UPDATE deletions SET restored = 1 WHERE id = ?1", [row_id])?;
+    Ok(())
 }
 
 pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
