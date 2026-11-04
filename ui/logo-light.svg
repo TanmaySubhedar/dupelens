@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" role="img" aria-label="DupeLens">
+  <title>DupeLens (small sizes)</title>
+  <defs>
+    <clipPath id="dl-a"><rect x="6" y="7" width="40" height="32" rx="16"/></clipPath>
+  </defs>
+  <rect x="18" y="25" width="40" height="32" rx="16" fill="#B45309" clip-path="url(#dl-a)"/>
+  <rect x="6" y="7" width="40" height="32" rx="16" stroke="#151515" stroke-width="6"/>
+  <rect x="18" y="25" width="40" height="32" rx="16" stroke="#151515" stroke-width="6"/>
+</svg>
