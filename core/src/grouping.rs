@@ -177,17 +177,29 @@ pub fn build_groups(
     local_difference: &mut LocalDifferenceFn,
 ) -> Vec<DuplicateGroup> {
     let mut uf = UnionFind::new(files.len());
+    // What the default (Balanced) setting alone would group. A group the chosen setting builds
+    // out of more than one of these needed a looser setting, so it is "tentative".
+    let balanced = GroupingConfig::default();
+    let mut uf_balanced = UnionFind::new(files.len());
 
     // 1. Exact duplicates.
     let firsts = first_of_each_content(&files);
     for (i, f) in files.iter().enumerate() {
         uf.union(firsts[f.sha256.as_str()], i);
+        uf_balanced.union(firsts[f.sha256.as_str()], i);
     }
 
     // 2-3. Near duplicates: hash candidates that also pass the pixel check.
     for (i, j) in near_candidates(&files, cfg) {
-        if local_difference(&files[i], &files[j]).is_some_and(|d| d <= cfg.max_local_difference) {
-            uf.union(i, j);
+        let Some(d) = local_difference(&files[i], &files[j]) else {
+            continue;
+        };
+        if d > cfg.max_local_difference {
+            continue;
+        }
+        uf.union(i, j);
+        if passes_all_four_tests(&files[i], &files[j], d, &balanced) {
+            uf_balanced.union(i, j);
         }
     }
 
@@ -201,7 +213,11 @@ pub fn build_groups(
     let mut groups: Vec<DuplicateGroup> = clusters
         .into_values()
         .filter(|c| c.len() > 1)
-        .map(|c| make_group(c.iter().map(|&i| files[i].clone()).collect()))
+        .map(|c| {
+            let first = uf_balanced.find(c[0]);
+            let tentative = c.iter().any(|&i| uf_balanced.find(i) != first);
+            make_group(c.iter().map(|&i| files[i].clone()).collect(), tentative)
+        })
         .collect();
 
     // Biggest wins first.
@@ -213,11 +229,18 @@ pub fn build_groups(
     groups
 }
 
-fn make_group(mut files: Vec<FileRecord>) -> DuplicateGroup {
-    // "Tentative" means only a looser setting than the default finds it: some member is further
-    // from the suggested copy than the Balanced preset allows. The UI does not pre-select such
-    // groups for deletion.
-    let balanced = GroupingConfig::default().phash_max;
+/// Whether two photos pass every one of the four tests (overall look, fine detail, shape, and
+/// pixel change `d`) under `cfg`.
+fn passes_all_four_tests(a: &FileRecord, b: &FileRecord, d: f64, cfg: &GroupingConfig) -> bool {
+    let (Some(pa), Some(pb)) = (a.phash, b.phash) else {
+        return false;
+    };
+    hamming(pa, pb) <= cfg.phash_max && is_near_match(a, b, cfg) && d <= cfg.max_local_difference
+}
+
+/// `tentative`: the group exists only because the setting is looser than Balanced on at least
+/// one of the four tests. The UI does not pre-select such groups for deletion.
+fn make_group(mut files: Vec<FileRecord>, tentative: bool) -> DuplicateGroup {
     files.sort_by_key(|f| f.id);
     let (best, reason) = recommend(&files);
     let keep = files[best].clone();
@@ -242,10 +265,6 @@ fn make_group(mut files: Vec<FileRecord>) -> DuplicateGroup {
             file: f,
         })
         .collect::<Vec<_>>();
-    let tentative = kind == GroupKind::Near
-        && members
-            .iter()
-            .any(|m| m.distance_to_recommended.is_some_and(|d| d > balanced));
     DuplicateGroup {
         id: members.iter().map(|m| m.file.id).min().expect("non-empty"),
         kind,
@@ -336,32 +355,90 @@ mod tests {
         assert_eq!(build_groups(files, &cfg, &mut |_, _| Some(5.0)).len(), 1);
     }
 
-    #[test]
-    fn only_a_looser_setting_finds_a_tentative_group() {
+    /// A pair that Balanced rejects and Loose accepts, differing in exactly one of the four tests.
+    fn tentative_under_loose(a: FileRecord, b: FileRecord, pixel_change: f64) -> bool {
         let loose = crate::matching::Preset::Loose.config();
-        let ten_bits = 0b11_1111_1111;
-        let files = vec![
-            rec(1, "a", 0, 0, 100, 100),
-            rec(2, "b", ten_bits, ten_bits, 100, 100),
-        ];
-        // Ten bits apart: beyond Balanced (8), within Loose (12).
+        let files = vec![a, b];
         assert!(
             build_groups(files.clone(), &GroupingConfig::default(), &mut |_, _| Some(
-                0.0
+                pixel_change
             ))
-            .is_empty()
+            .is_empty(),
+            "Balanced must reject this pair"
         );
-        let groups = build_groups(files, &loose, &mut |_, _| Some(0.0));
-        assert_eq!(groups.len(), 1);
-        assert!(groups[0].tentative, "needs the Loose setting to be found");
+        let groups = build_groups(files, &loose, &mut |_, _| Some(pixel_change));
+        assert_eq!(groups.len(), 1, "Loose must accept this pair");
+        groups[0].tentative
+    }
 
-        // Five bits apart: Balanced finds it too, so it is not tentative.
+    #[test]
+    fn a_group_needing_a_looser_overall_look_is_tentative() {
+        let ten_bits = 0b11_1111_1111; // Balanced allows 8, Loose 12
+        assert!(tentative_under_loose(
+            rec(1, "a", 0, 0, 100, 100),
+            rec(2, "b", ten_bits, 0, 100, 100),
+            0.0
+        ));
+    }
+
+    #[test]
+    fn a_group_needing_a_looser_fine_detail_is_tentative() {
+        let fourteen_bits = 0b11_1111_1111_1111; // dHash: Balanced allows 12, Loose 18
+        assert!(tentative_under_loose(
+            rec(1, "a", 0, 0, 100, 100),
+            rec(2, "b", 0, fourteen_bits, 100, 100),
+            0.0
+        ));
+    }
+
+    #[test]
+    fn a_group_needing_a_looser_shape_is_tentative() {
+        // Aspect ratios 6% apart: Balanced allows 5%, Loose 8%.
+        assert!(tentative_under_loose(
+            rec(1, "a", 0, 0, 1000, 1000),
+            rec(2, "b", 0, 0, 940, 1000),
+            0.0
+        ));
+    }
+
+    #[test]
+    fn a_group_needing_a_looser_pixel_check_is_tentative() {
+        // Every hash agrees exactly, but the pixels differ by 25: Balanced allows 18, Loose 30.
+        assert!(tentative_under_loose(
+            rec(1, "a", 0, 0, 100, 100),
+            rec(2, "b", 0, 0, 100, 100),
+            25.0
+        ));
+    }
+
+    #[test]
+    fn a_pair_balanced_accepts_is_not_tentative_even_under_loose() {
+        let loose = crate::matching::Preset::Loose.config();
         let close = vec![
             rec(1, "a", 0, 0, 100, 100),
             rec(2, "b", 0b11111, 0b11111, 100, 100),
         ];
-        let groups = build_groups(close, &loose, &mut |_, _| Some(0.0));
+        let groups = build_groups(close, &loose, &mut |_, _| Some(5.0));
+        assert_eq!(groups.len(), 1);
         assert!(!groups[0].tentative);
+    }
+
+    #[test]
+    fn a_chain_joined_by_one_loose_link_is_tentative_as_a_whole() {
+        // 1~2 is a Balanced match; 3 only joins on the Loose pixel limit. All three form one
+        // group, and the whole group is tentative.
+        let loose = crate::matching::Preset::Loose.config();
+        let files = vec![
+            rec(1, "a", 0, 0, 100, 100),
+            rec(2, "b", 0, 0, 100, 100),
+            rec(3, "c", 0, 0, 100, 100),
+        ];
+        let groups = build_groups(files, &loose, &mut |a, b| {
+            Some(if a.id + b.id == 3 { 3.0 } else { 25.0 })
+        });
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].members.len(), 3);
+        assert!(groups[0].tentative);
     }
 
     #[test]

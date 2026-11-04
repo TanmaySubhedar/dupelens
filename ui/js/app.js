@@ -119,6 +119,9 @@ function matchingSection() {
         }
       } catch (err) {
         showError(err);
+        // Show what is really saved, not the choice that failed.
+        state.settings = await call('get_settings').catch(() => state.settings);
+        renderFolders();
       }
     },
   }, st.presets
@@ -242,12 +245,15 @@ function showScan({ title = 'Scanning', note = 'Files that haven’t changed sin
         : byFiles ? `${status.done.toLocaleString()} of ${status.total.toLocaleString()}` : '';
       return setTimeout(tick, POLL_MS);
     }
-    if (status.state === 'failed') {
-      toast(`${title} failed: ${status.error}`, 'error');
-      return showFolders();
-    }
-    if (status.state === 'cancelled') {
-      toast('Cancelled. Nothing was lost; files already read are remembered.');
+    if (status.state === 'failed' || status.state === 'cancelled') {
+      // The engine has dropped its cached results (and a regroup may already have saved a new
+      // matching setting), so the groups held here no longer match it. Forget them: the person
+      // rescans or updates the results, rather than acting on a list from the old setting.
+      state.groups = [];
+      state.selection.load([]);
+      state.lastSummary = null;
+      if (status.state === 'failed') toast(`${title} failed: ${status.error}`, 'error');
+      else toast('Cancelled. Nothing was lost; files already read are remembered.');
       return showFolders();
     }
     state.lastSummary = status.state === 'done' ? status.summary : null;

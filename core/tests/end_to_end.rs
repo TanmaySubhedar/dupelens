@@ -899,3 +899,71 @@ fn undo_reports_a_file_that_left_the_bin_and_one_whose_path_is_taken() {
         gone.failed
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// Deleting must never remove the last good copy.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn refuses_to_delete_when_the_copy_to_keep_has_vanished() {
+    let (_dir, mut engine, victim, victim_path, keep) = twin_files();
+    let keep_path = engine
+        .groups()
+        .unwrap()
+        .remove(0)
+        .members
+        .into_iter()
+        .find(|m| m.file.id == keep)
+        .unwrap()
+        .file
+        .path;
+
+    // The kept copy is removed outside DupeLens after the scan (the database still lists it).
+    std::fs::remove_file(&keep_path).unwrap();
+    let err = engine.delete(&[victim], DeleteMode::Permanent).unwrap_err();
+    assert!(
+        matches!(&err, Error::DeletionRefused(why) if why.contains("rescan")),
+        "{err:?}"
+    );
+    assert!(victim_path.exists(), "the last copy must survive");
+}
+
+#[test]
+fn refuses_to_delete_when_the_copy_to_keep_was_modified() {
+    let (_dir, mut engine, victim, victim_path, keep) = twin_files();
+    let keep_path = engine
+        .groups()
+        .unwrap()
+        .remove(0)
+        .members
+        .into_iter()
+        .find(|m| m.file.id == keep)
+        .unwrap()
+        .file
+        .path;
+    // Same name, different contents and size since the scan.
+    std::fs::write(&keep_path, b"edited since the scan").unwrap();
+    assert!(engine.delete(&[victim], DeleteMode::Permanent).is_err());
+    assert!(victim_path.exists());
+}
+
+#[test]
+fn deleting_still_works_when_another_copy_is_intact() {
+    // Three identical files: removing one outside DupeLens leaves two good ones, so deleting
+    // one of them is fine as long as a good copy stays.
+    let dir = tempfile::tempdir().unwrap();
+    let data = filler(8_000, 2);
+    for sub in ["a", "b", "c"] {
+        write(&dir.path().join(sub).join("f.bin"), &data);
+    }
+    let mut engine = engine_with_folder(dir.path());
+    engine.scan(&|_| {}).unwrap();
+    let g = engine.groups().unwrap().remove(0);
+    let mut others = g.members.iter().filter(|m| m.file.id != g.recommended_id);
+    let (gone, target) = (others.next().unwrap(), others.next().unwrap());
+    std::fs::remove_file(&gone.file.path).unwrap(); // vanished, but the kept copy is fine
+    let report = engine
+        .delete(&[target.file.id], DeleteMode::Permanent)
+        .unwrap();
+    assert_eq!(report.deleted, vec![target.file.id]);
+}

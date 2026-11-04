@@ -39,3 +39,10 @@ has no network and no account, so that memory is local.
   restored (reported, not overwritten).
 - On macOS there is no undo; the files are in the Trash to restore by hand.
 - The history is never trimmed.
+- Undo picks the newest Recycle Bin entry for a path from this action's time onward. If the same
+  path was deleted again later (the file recreated and deleted), the later copy can be the one
+  restored.
+- `stats.last_batch` is the most recent action not undone. If that was a permanent delete, an
+  earlier Recycle Bin action is reachable only by passing its `batch` to `undo`.
+- A failed history write after a file is deleted does not stop the report (the file is gone, so
+  the report must say so); that file simply cannot be undone.

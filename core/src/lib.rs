@@ -253,7 +253,14 @@ impl Engine {
     /// Changes and saves the matching setting. Takes effect on the next [`Engine::groups`];
     /// no rescan is needed.
     pub fn set_matching(&mut self, settings: MatchingSettings) -> Result<()> {
+        // Custom values are checked here too, so no caller can store an out-of-range set.
+        let settings = if settings.preset == Preset::Custom {
+            MatchingSettings::custom(settings.config)?
+        } else {
+            MatchingSettings::preset(settings.preset)
+        };
         let c = &settings.config;
+        let tx = self.conn.transaction()?;
         for (key, value) in [
             ("matching.preset", settings.preset.key().to_string()),
             ("matching.phash_max", c.phash_max.to_string()),
@@ -264,8 +271,9 @@ impl Engine {
                 c.max_local_difference.to_string(),
             ),
         ] {
-            db::set_setting(&self.conn, key, &value)?;
+            db::set_setting(&tx, key, &value)?;
         }
+        tx.commit()?;
         self.grouping = settings.config;
         self.matching_preset = settings.preset;
         Ok(())
@@ -513,7 +521,9 @@ impl Engine {
                     summary.files_analyzed += 1;
                     summary.bytes_read += job.file.size;
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                // A read stopped by our own cancel is not a problem with the file. A genuine
+                // error of the same kind (no cancel requested) is reported like any other.
+                Err(e) if cancelled && e.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(_) => summary.unreadable.push(job.file.path),
             }
         }
@@ -627,9 +637,25 @@ impl Engine {
         }
 
         for g in self.groups()? {
+            if !g.members.iter().any(|m| requested.contains(&m.file.id)) {
+                continue;
+            }
             if g.members.iter().all(|m| requested.contains(&m.file.id)) {
                 return Err(Error::DeletionRefused(format!(
                     "this would delete every copy in group {} (keep at least one)",
+                    g.id
+                )));
+            }
+            // The database says a copy stays, but it may have been removed or changed since the
+            // scan (for instance after a cancelled scan, which forgets nothing). Deleting the
+            // others would then destroy the last good copy.
+            if !g
+                .members
+                .iter()
+                .any(|m| !requested.contains(&m.file.id) && unchanged_on_disk(&m.file))
+            {
+                return Err(Error::DeletionRefused(format!(
+                    "the copy that would be kept in group {} has changed or is missing since the last scan; rescan first",
                     g.id
                 )));
             }
@@ -643,17 +669,20 @@ impl Engine {
         for f in files {
             match self.delete_one(&f, &folders, mode) {
                 Ok(()) => {
-                    db::delete_file_row(&self.conn, f.id)?;
-                    db::record_deletion(
+                    // The file is gone. Whatever happens to the bookkeeping, the report must say
+                    // so: a stale database row is dropped by the next scan, and a missing history
+                    // entry only means this file cannot be undone.
+                    report.bytes_freed += f.size;
+                    report.deleted.push(f.id);
+                    let _ = db::delete_file_row(&self.conn, f.id);
+                    let _ = db::record_deletion(
                         &self.conn,
                         batch,
                         at,
                         &f.path,
                         f.size,
                         mode == DeleteMode::Trash,
-                    )?;
-                    report.bytes_freed += f.size;
-                    report.deleted.push(f.id);
+                    );
                 }
                 Err(why) => report.failed.push((f.id, why)),
             }
@@ -755,6 +784,12 @@ fn canonical_folder(folder: &Path) -> std::io::Result<PathBuf> {
         }
     }
     Ok(canonical)
+}
+
+/// Whether a file is still there with the size and modified time recorded by the last scan.
+fn unchanged_on_disk(f: &FileRecord) -> bool {
+    std::fs::symlink_metadata(&f.path)
+        .is_ok_and(|m| m.is_file() && m.len() == f.size && scanner::mtime_ns(&m) == f.mtime_ns)
 }
 
 /// Brings one file back from the OS trash to where it was deleted from.

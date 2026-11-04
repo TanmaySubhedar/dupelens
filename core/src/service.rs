@@ -26,7 +26,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 /// Longest side of the previews shown in the photo grid and in the enlarged view.
 const THUMB_SMALL: u32 = 360;
@@ -427,7 +427,18 @@ impl Service {
         if self.is_scanning() {
             return Err(ApiError::busy());
         }
-        self.inner.engine.try_lock().map_err(|_| ApiError::busy())
+        self.try_engine()
+    }
+
+    /// The engine if nothing holds it right now. A lock left "poisoned" by a panic is still
+    /// usable (the data is intact: everything is saved in transactions), and must not make the
+    /// app report "busy" for ever.
+    fn try_engine(&self) -> Result<MutexGuard<'_, Engine>, ApiError> {
+        match self.inner.engine.try_lock() {
+            Ok(guard) => Ok(guard),
+            Err(TryLockError::Poisoned(p)) => Ok(p.into_inner()),
+            Err(TryLockError::WouldBlock) => Err(ApiError::busy()),
+        }
     }
 
     pub fn folders(&self) -> Result<Vec<String>, ApiError> {
@@ -481,7 +492,7 @@ impl Service {
             if matches!(*status, ScanStatus::Running { .. }) {
                 return Err(ApiError::busy());
             }
-            let engine = self.inner.engine.try_lock().map_err(|_| ApiError::busy())?;
+            let engine = self.try_engine()?;
             if job == Job::Scan && engine.folders()?.is_empty() {
                 return Err(crate::Error::NoFolders.into());
             }
@@ -500,10 +511,16 @@ impl Service {
         }
         let me = self.clone();
         std::thread::spawn(move || {
-            let outcome = match job {
+            let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match job {
                 Job::Scan => me.run_scan(),
                 Job::Regroup => me.run_regroup(),
-            };
+            }));
+            let outcome = ran.unwrap_or_else(|_| {
+                Err(ApiError::new(
+                    ErrorKind::Failed,
+                    "something went wrong inside DupeLens; nothing was changed. Please try again",
+                ))
+            });
             if outcome.is_err() {
                 // A job that stops partway may already have changed the database, so the
                 // cached groups and thumbnails no longer match it. Drop them; `groups()`
@@ -646,10 +663,7 @@ impl Service {
                         max_local_difference: c.max_local_difference,
                         look_alikes: true,
                     })?,
-                    (Preset::Custom, None) => MatchingSettings {
-                        preset: Preset::Custom,
-                        config: engine.matching().config,
-                    },
+                    (Preset::Custom, None) => MatchingSettings::custom(engine.matching().config)?,
                     (p, _) => MatchingSettings::preset(p),
                 };
                 engine.set_matching(settings)?;
@@ -1039,6 +1053,38 @@ mod tests {
         let err = s.call("undo", json!({})).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Failed);
         assert!(err.message.contains("permanently"), "{}", err.message);
+    }
+
+    #[test]
+    fn custom_without_values_keeps_look_alikes_on() {
+        let s = Service::new(Engine::open_in_memory().unwrap());
+        s.call("set_settings", json!({ "preset": "exact_only" }))
+            .unwrap();
+        let st = s
+            .call("set_settings", json!({ "preset": "custom" }))
+            .unwrap();
+        assert_eq!(st["preset"], "custom");
+        assert_eq!(
+            st["config"]["look_alikes"], true,
+            "Custom always looks for look-alikes"
+        );
+    }
+
+    #[test]
+    fn a_panic_while_holding_the_engine_does_not_leave_the_app_busy() {
+        let s = Service::new(Engine::open_in_memory().unwrap());
+        let me = s.clone();
+        // Poison the engine's lock the way a panicking job would.
+        let _ = std::thread::spawn(move || {
+            let _guard = me.inner.engine.lock().unwrap();
+            panic!("simulated failure in a job");
+        })
+        .join();
+        assert!(s.inner.engine.is_poisoned());
+        // Commands still work, and a new scan can start.
+        assert!(s.call("folders", Value::Null).is_ok());
+        let err = s.call("start_scan", Value::Null).unwrap_err();
+        assert_ne!(err.kind, ErrorKind::Busy, "no folders yet, but not 'busy'");
     }
 
     #[test]
