@@ -17,6 +17,9 @@ ui/js/app.js ──► ui/js/api.js ──► Tauri invoke ──► desktop/src
 There is no browser or server mode: opened in a plain browser, the page only shows
 "DupeLens must be opened as the app."
 
+This page has two halves: the **contract** between the pages and the app (below), and the
+**visual design** the pages are being rebuilt to ([Visual design](#visual-design-v02-direction)).
+
 ## Commands
 
 The page sends a command name and a JSON object of arguments, and gets JSON back. Errors come
@@ -81,3 +84,112 @@ core and `dupelens-cli` builds stay light.
 Requirements for it: `app.withGlobalTauri: true` (the page uses
 `window.__TAURI__`), the `api` command, the `thumb` URI scheme, and a CSP that allows
 `ipc:`/`http://ipc.localhost` for IPC and `thumb:`/`http://thumb.localhost` for images.
+
+## Visual design (v0.2 direction)
+
+Status: **agreed direction, not yet built.** The current pages in `ui/` still use the old look
+(blue accent, rounded cards, emoji). The mock-ups this section was drawn from are not kept in
+the repository; this page and the logo files are the reference.
+
+### Principles
+
+- **Clean, minimal, professional.** Quiet greys, one accent colour, thin lines instead of
+  shadows, small corners (4 px). No emoji anywhere in the interface, and no decorative
+  illustrations.
+- **Data-forward.** Numbers (sizes, counts, dimensions) are set in a monospace face so they
+  line up and read as measurements. Sentences are short and factual.
+- **Thumbnails are always visible.** A person must never click to see what a group contains.
+  Every copy in every group shows its thumbnail in the list, and pointing at a copy shows it
+  large in a side pane. Keyboard shortcuts cover the rest (Space: full size; ← →: move between
+  copies; K / D: keep or delete). Full size must not need an extra click.
+- **Dark mode is first-class.** Every screen is designed and checked in light and dark. The theme
+  follows the system setting (`prefers-color-scheme`).
+- **Nothing is deleted without clear review.** The review screen shows each file to be
+  removed next to the copy that stays, defaults to the Recycle Bin, and warns when
+  non-photo files (videos, archives) are included.
+
+### Colour
+
+One accent (amber). Greys carry everything else. Keep/delete state is shown by amber (keep)
+and red (delete), always with a text label as well as colour.
+
+| Token | Light | Dark |
+|---|---|---|
+| page background | `#F6F5F2` | `#0F0F0E` |
+| surface (panels, top bar) | `#FFFFFF` | `#171716` |
+| text | `#151515` | `#EDEBE6` |
+| muted text | `#5F5D57` | `#A3A09A` |
+| border | `#DEDCD6` | `#2C2B28` |
+| accent | `#B45309` | `#F2A33A` |
+| accent soft (selected, notes) | `#FBEBD5` | `#2A2113` |
+| text on accent | `#FFFFFF` | `#1A1100` |
+| delete | `#B3261E` | `#F08A83` |
+| delete soft | `#FBEAE8` | `#2E1C1B` |
+
+Muted text on the page background passes 4.5:1 contrast in both themes; check any new colour
+pair the same way.
+
+### Type
+
+IBM Plex Sans for text and IBM Plex Mono for numbers, sizes, paths and dimensions. Both must
+be **bundled inside `ui/`** (the Content-Security-Policy forbids loading fonts from the
+internet), with system fonts as the fallback.
+
+### Layout and screens
+
+A top bar with the logo and a plain text navigation (Overview, Results, Settings). No sidebar.
+
+| Screen | What it holds |
+|---|---|
+| **Overview** | Reclaimable space as one large number, a stacked bar of reclaimable space by file type with a table under it, the folder list, and a side panel with the four matching presets and a **Re-run** button |
+| **Scanning** | Percentage, four steps (finding, reading, comparing, saving), the file being read, plain-language counts (found, read, unchanged, cloud-only skipped, unreadable) and a **Found so far** panel that fills with the first duplicates while the scan runs, plus Cancel |
+| **Results** | File-type filter chips with counts, the selection total and **Review and delete** in a toolbar. Left: groups, each with a row of thumbnails of all copies tagged Keep or Delete. Right (372 px): the large preview of the copy being pointed at, its facts, and Keep/Delete buttons |
+| **Review and delete** | Every file to be removed beside the copy that stays, the total, Recycle Bin (default) or permanent delete, a notice when videos or archives are included, and the three safety promises |
+| **Done** | Space freed, a breakdown by type, **Undo** and **Continue reviewing**, and a quiet panel with the lifetime total and the next milestone, stored only on this computer |
+| **Settings** | Not yet designed. Holds the advanced matching values |
+
+Group thumbnails: photos use the engine's thumbnails. For videos, PDFs and Office files, use the
+operating system's thumbnail service where it exists (Windows); otherwise show a file-type tile
+with the extension. A video thumbnail carries its duration.
+
+The Recycle Bin does not release disk space until it is emptied. The Review and Done screens
+say so in plain words.
+
+### Matching control
+
+"What counts as a duplicate" has four presets: **Exact only**, **Strict**, **Balanced** (today's
+behaviour) and **Loose**. The Overview and Results screens show the current choice and let the
+user change it; **Re-run** regroups from cached data without reading the folders again.
+Matches that only the looser presets find are tagged "Maybe" and not pre-selected for
+deletion. Advanced settings show the four raw values, each with a one-line explanation. How
+these map onto `GroupingConfig` is still to be decided and recorded as a decision record.
+
+### Logo
+
+The mark is two outlined pills offset from each other, with the overlap filled amber: the same
+thing twice. Files are in [`design/logo/`](design/logo/):
+
+| File | Use |
+|---|---|
+| `dupelens-mark-light.svg` | On light backgrounds, 32 px and larger |
+| `dupelens-mark-dark.svg` | On dark backgrounds, 32 px and larger |
+| `dupelens-mark-small-light.svg` | 16 to 24 px on light backgrounds: heavier lines and a larger overlap |
+| `dupelens-mark-small-dark.svg` | 16 to 24 px on dark backgrounds |
+
+These are drawn but **not yet wired in**: `ui/icon.svg` and the app icons in `desktop/icons/`
+still hold the old mark. Replacing them means regenerating `icon.ico` and the PNG sizes (and
+an `.icns` for a future macOS build) from the small variant at the small sizes. Check the 16 px
+render before shipping.
+
+### Planned engine and command changes this design needs
+
+These are not in the contract above yet. Each needs a decision record when built.
+
+- ~~Exact matching for every file type~~ Done in the engine ([0013](decisions/0013-exact-matching-for-every-file-type.md)).
+  `groups` results now carry `category` and `modified_secs` for each file, and the scan summary
+  carries `files_without_twin`, `bytes_read` and `cloud_only_skipped`; the pages do not use
+  them yet. Still to do: progress in bytes, and scan cancellation.
+- Matching settings stored in the database, with commands to read and change them and to regroup
+  from cached results (with progress and cancel).
+- A "not a duplicate" list.
+- Deletion history and undo for the Recycle Bin, and a local lifetime total.
