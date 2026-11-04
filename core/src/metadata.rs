@@ -81,10 +81,14 @@ pub fn analyze(path: &Path, size: u64) -> std::io::Result<Analysis> {
 }
 
 /// The analysis of a file that is not a photo: its SHA-256 only, read as a stream so a
-/// multi-gigabyte video never has to fit in memory.
-pub fn analyze_plain(path: &Path) -> std::io::Result<Analysis> {
+/// multi-gigabyte video never has to fit in memory. `on_chunk` receives the bytes read so far
+/// in each chunk and may return `false` to stop (see [`hashing::sha256_reader_with`]).
+pub fn analyze_plain(
+    path: &Path,
+    on_chunk: &mut dyn FnMut(u64) -> bool,
+) -> std::io::Result<Analysis> {
     Ok(Analysis {
-        sha256: hashing::sha256_reader(File::open(path)?)?,
+        sha256: hashing::sha256_reader_with(File::open(path)?, on_chunk)?,
         exif: ExifInfo {
             orientation: 1,
             ..Default::default()

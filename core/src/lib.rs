@@ -26,7 +26,7 @@ use rusqlite::Connection;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,8 +39,25 @@ pub enum ScanPhase {
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct ScanProgress {
     pub phase: ScanPhase,
+    /// Files finished and files to do, in this phase.
     pub done: usize,
     pub total: usize,
+    /// Bytes read and bytes to read, while analysing. A single huge file moves this bar even
+    /// though `done` stays put until it is finished.
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+}
+
+impl ScanProgress {
+    fn new(phase: ScanPhase, done: usize, total: usize) -> Self {
+        Self {
+            phase,
+            done,
+            total,
+            bytes_done: 0,
+            bytes_total: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -56,6 +73,9 @@ pub struct ScanSummary {
     pub bytes_read: u64,
     /// Cloud-only files (e.g. OneDrive "Files On-Demand") left alone so they are not downloaded.
     pub cloud_only_skipped: usize,
+    /// Extra names for a file already in the list (hard links). Deleting one would free no
+    /// space, so they are left out rather than shown as duplicates.
+    pub hard_links_skipped: usize,
     /// Files whose cached analysis was reused because size and mtime were unchanged.
     pub files_unchanged: usize,
     /// Database entries removed because the file no longer exists in a selected folder.
@@ -171,6 +191,19 @@ impl Engine {
     /// This keeps a library of large videos and music cheap to scan: only real or very likely
     /// duplicates are ever read end to end.
     pub fn scan(&mut self, progress: &(dyn Fn(ScanProgress) + Sync)) -> Result<ScanSummary> {
+        self.scan_cancellable(progress, &AtomicBool::new(false))
+    }
+
+    /// [`Engine::scan`] that stops once `cancel` is set, returning [`Error::Cancelled`].
+    ///
+    /// Nothing is half-written: everything is saved in one transaction at the end. If the scan
+    /// is cancelled while reading files, the files already read are saved first (so the next
+    /// scan does not repeat that work), but nothing is forgotten or removed.
+    pub fn scan_cancellable(
+        &mut self,
+        progress: &(dyn Fn(ScanProgress) + Sync),
+        cancel: &AtomicBool,
+    ) -> Result<ScanSummary> {
         let folders = self.folders()?;
         if folders.is_empty() {
             return Err(Error::NoFolders);
@@ -179,12 +212,14 @@ impl Engine {
         let (present, missing): (Vec<_>, Vec<_>) = folders.into_iter().partition(|f| f.is_dir());
         summary.missing_folders = missing;
 
-        progress(ScanProgress {
-            phase: ScanPhase::Discovering,
-            done: 0,
-            total: 0,
-        });
-        let discovery = scanner::discover(&present, &self.scan_options);
+        progress(ScanProgress::new(ScanPhase::Discovering, 0, 0));
+        let mut discovery = scanner::discover_cancellable(&present, &self.scan_options, cancel);
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
+        let (files, hard_links) = scanner::remove_hard_links(std::mem::take(&mut discovery.files));
+        discovery.files = files;
+        summary.hard_links_skipped = hard_links;
         summary.files_found = discovery.files.len();
         summary.cloud_only_skipped = discovery.cloud_only;
         summary.unreadable = discovery.skipped;
@@ -240,11 +275,7 @@ impl Engine {
         }
 
         // Step 2: a cheap fingerprint of every candidate that shares its size with another file.
-        progress(ScanProgress {
-            phase: ScanPhase::Analyzing,
-            done: 0,
-            total: 0,
-        });
+        progress(ScanProgress::new(ScanPhase::Analyzing, 0, 0));
         let fingerprinted: Vec<_> = candidates
             .into_par_iter()
             .map(|(f, id)| {
@@ -252,6 +283,9 @@ impl Engine {
                 (f, id, r)
             })
             .collect();
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
         let mut same_partial: HashMap<(u64, &str), usize> = HashMap::new();
         for (f, _, r) in &fingerprinted {
             if let Ok(h) = r {
@@ -285,35 +319,44 @@ impl Engine {
 
         // Step 3: read in full.
         let total = jobs.len();
+        let bytes_total: u64 = jobs.iter().map(|j| j.file.size).sum();
         let done = AtomicUsize::new(0);
-        progress(ScanProgress {
-            phase: ScanPhase::Analyzing,
-            done: 0,
-            total,
-        });
+        let bytes_done = AtomicU64::new(0);
+        let report = |files_done: usize, bytes: u64| {
+            progress(ScanProgress {
+                phase: ScanPhase::Analyzing,
+                done: files_done,
+                total,
+                bytes_done: bytes,
+                bytes_total,
+            })
+        };
+        report(0, 0);
         let analysed: Vec<_> = jobs
             .into_par_iter()
             .map(|job| {
+                if cancel.load(Ordering::Relaxed) {
+                    return (job, Err(std::io::ErrorKind::Interrupted.into()));
+                }
                 let result = if job.photo {
-                    metadata::analyze(&job.file.path, job.file.size)
+                    let r = metadata::analyze(&job.file.path, job.file.size);
+                    bytes_done.fetch_add(job.file.size, Ordering::Relaxed);
+                    r
                 } else {
-                    metadata::analyze_plain(&job.file.path)
+                    metadata::analyze_plain(&job.file.path, &mut |n| {
+                        let b = bytes_done.fetch_add(n, Ordering::Relaxed) + n;
+                        report(done.load(Ordering::Relaxed), b);
+                        !cancel.load(Ordering::Relaxed)
+                    })
                 };
                 let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-                progress(ScanProgress {
-                    phase: ScanPhase::Analyzing,
-                    done: n,
-                    total,
-                });
+                report(n, bytes_done.load(Ordering::Relaxed));
                 (job, result)
             })
             .collect();
+        let cancelled = cancel.load(Ordering::Relaxed);
 
-        progress(ScanProgress {
-            phase: ScanPhase::Saving,
-            done: 0,
-            total: 0,
-        });
+        progress(ScanProgress::new(ScanPhase::Saving, 0, 0));
         let tx = self.conn.transaction()?;
         let scan_id = db::next_scan_id(&tx)?;
         for id in seen_ids {
@@ -339,8 +382,14 @@ impl Engine {
                     summary.files_analyzed += 1;
                     summary.bytes_read += job.file.size;
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(_) => summary.unreadable.push(job.file.path),
             }
+        }
+        if cancelled {
+            // Keep what was read, but forget nothing: files not reached yet look "unseen".
+            tx.commit()?;
+            return Err(Error::Cancelled);
         }
         summary.files_removed = db::prune_unseen(&tx, scan_id)?;
         db::prune_local_differences(&tx, LOCAL_DIFFERENCE_METHOD)?;
@@ -353,6 +402,17 @@ impl Engine {
     /// Look-alike candidates are compared pixel by pixel (reading the two files) the first
     /// time they meet; the score is cached, so later calls only read the database.
     pub fn groups(&self) -> Result<Vec<DuplicateGroup>> {
+        self.groups_cancellable(&|_, _| {}, &AtomicBool::new(false))
+    }
+
+    /// [`Engine::groups`] with progress (`done`, `total` look-alike pairs compared) and
+    /// cancellation, which returns [`Error::Cancelled`]. Scores computed before a cancel are
+    /// kept, so running it again carries on where it stopped.
+    pub fn groups_cancellable(
+        &self,
+        progress: &(dyn Fn(usize, usize) + Sync),
+        cancel: &AtomicBool,
+    ) -> Result<Vec<DuplicateGroup>> {
         let files = db::all_files(&self.conn)?;
         let key = |a: &FileRecord, b: &FileRecord| {
             let (x, y) = db::ordered(&a.sha256, &b.sha256);
@@ -372,9 +432,15 @@ impl Engine {
                 None => missing.push((i, j, k)),
             }
         }
+        let total = missing.len();
+        let compared = AtomicUsize::new(0);
+        progress(0, total);
         let computed: Vec<_> = missing
             .into_par_iter()
             .map(|(i, j, k)| {
+                if cancel.load(Ordering::Relaxed) {
+                    return (k, None);
+                }
                 // Unreadable or undecodable right now (e.g. file moved): no score, no match.
                 let score = match (
                     metadata::load_gray(&files[i].path),
@@ -383,6 +449,7 @@ impl Engine {
                     (Ok(Some(a)), Ok(Some(b))) => Some(hashing::local_difference(&a, &b)),
                     _ => None,
                 };
+                progress(compared.fetch_add(1, Ordering::Relaxed) + 1, total);
                 (k, score)
             })
             .collect();
@@ -391,6 +458,9 @@ impl Engine {
                 db::store_local_difference(&self.conn, &k.0, &k.1, LOCAL_DIFFERENCE_METHOD, score)?;
                 scores.insert(k, score);
             }
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
         }
 
         Ok(grouping::build_groups(

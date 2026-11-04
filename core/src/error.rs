@@ -20,6 +20,10 @@ pub enum Error {
 
     #[error("refusing to delete: {0}")]
     DeletionRefused(String),
+
+    /// The user stopped a scan or comparison. Nothing is left half-written.
+    #[error("cancelled")]
+    Cancelled,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

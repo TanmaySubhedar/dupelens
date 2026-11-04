@@ -3,7 +3,10 @@
 //! Every regular file is a candidate, whatever its type. Photos get the full look-alike
 //! analysis; everything else takes part in exact matching only (see [`crate::Engine::scan`]).
 
+use rayon::prelude::*;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
 
@@ -145,6 +148,16 @@ pub fn mtime_ns(meta: &std::fs::Metadata) -> i64 {
 
 /// Walks the given folders (never following symbolic links out of them) and lists their files.
 pub fn discover(folders: &[PathBuf], options: &ScanOptions) -> Discovery {
+    discover_cancellable(folders, options, &AtomicBool::new(false))
+}
+
+/// [`discover`], stopping early (with whatever was found so far) once `cancel` is set. The
+/// caller must check the flag and discard the partial result.
+pub fn discover_cancellable(
+    folders: &[PathBuf],
+    options: &ScanOptions,
+    cancel: &AtomicBool,
+) -> Discovery {
     let mut out = Discovery::default();
     for root in collapse_nested(folders) {
         let walker = WalkDir::new(&root)
@@ -156,6 +169,9 @@ pub fn discover(folders: &[PathBuf], options: &ScanOptions) -> Discovery {
                     || !e.file_name().to_str().is_some_and(is_skipped_dir)
             });
         for entry in walker {
+            if cancel.load(Ordering::Relaxed) {
+                return out;
+            }
             let entry = match entry {
                 Ok(e) => e,
                 Err(err) => {
@@ -197,10 +213,82 @@ pub fn discover(folders: &[PathBuf], options: &ScanOptions) -> Discovery {
     out
 }
 
+/// Drops files that are hard links to a file already in the list, and returns how many.
+///
+/// Two names for the same data look like a duplicate, but deleting one frees no space and
+/// saves nothing. Only files that share a size can be links to one another, so only those are
+/// opened to be compared; the first name found is kept.
+pub fn remove_hard_links(files: Vec<DiscoveredFile>) -> (Vec<DiscoveredFile>, usize) {
+    let mut per_size: HashMap<u64, usize> = HashMap::new();
+    for f in &files {
+        *per_size.entry(f.size).or_default() += 1;
+    }
+    let handles: Vec<Option<same_file::Handle>> = files
+        .par_iter()
+        .map(|f| {
+            (per_size[&f.size] > 1)
+                .then(|| same_file::Handle::from_path(&f.path).ok())
+                .flatten()
+        })
+        .collect();
+    let mut seen = HashSet::new();
+    let mut kept = Vec::with_capacity(files.len());
+    let mut skipped = 0;
+    for (file, handle) in files.into_iter().zip(handles) {
+        match handle {
+            Some(h) => {
+                if seen.insert(h) {
+                    kept.push(file);
+                } else {
+                    skipped += 1;
+                }
+            }
+            None => kept.push(file),
+        }
+    }
+    (kept, skipped)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn hard_links_count_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("a.bin"), b"same bytes").unwrap();
+        fs::hard_link(root.join("a.bin"), root.join("link.bin")).unwrap();
+        fs::write(root.join("copy.bin"), b"same bytes").unwrap(); // a real copy, not a link
+        fs::write(root.join("other.bin"), b"different size!").unwrap();
+
+        let found = discover(&[root.to_path_buf()], &ScanOptions::default()).files;
+        assert_eq!(found.len(), 4);
+        let (kept, skipped) = remove_hard_links(found);
+        assert_eq!(skipped, 1, "one of the two names for a.bin is dropped");
+        assert_eq!(kept.len(), 3);
+        let names: Vec<_> = kept
+            .iter()
+            .map(|f| f.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.contains(&"copy.bin".to_string()) && names.contains(&"other.bin".to_string())
+        );
+    }
+
+    #[test]
+    fn discovery_stops_when_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), b"x").unwrap();
+        let cancel = AtomicBool::new(true);
+        let found = discover_cancellable(
+            &[dir.path().to_path_buf()],
+            &ScanOptions::default(),
+            &cancel,
+        );
+        assert!(found.files.is_empty());
+    }
 
     #[test]
     fn nested_folders_collapse_to_their_parent() {

@@ -560,3 +560,131 @@ fn an_old_database_is_upgraded_without_losing_folders() {
     let engine = Engine::open(&db).unwrap();
     assert_eq!(engine.folders().unwrap(), vec![PathBuf::from("/kept")]);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Cancelling, byte progress and hard links.
+// ---------------------------------------------------------------------------------------------
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+
+#[test]
+fn a_scan_cancelled_before_it_starts_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = filler(50_000, 1);
+    write(&dir.path().join("a.bin"), &data);
+    write(&dir.path().join("b.bin"), &data);
+    let mut engine = engine_with_folder(dir.path());
+
+    let cancel = AtomicBool::new(true);
+    assert!(matches!(
+        engine.scan_cancellable(&|_| {}, &cancel),
+        Err(Error::Cancelled)
+    ));
+    assert!(engine.groups().unwrap().is_empty(), "nothing was saved");
+
+    // The same engine scans normally afterwards.
+    engine.scan(&|_| {}).unwrap();
+    assert_eq!(engine.groups().unwrap().len(), 1);
+}
+
+#[test]
+fn cancelling_while_reading_keeps_the_database_usable() {
+    let dir = tempfile::tempdir().unwrap();
+    // Several big identical pairs, so there is real work to interrupt.
+    for i in 0..6u8 {
+        let data = filler(3_000_000, i);
+        write(&dir.path().join(format!("a/{i}.bin")), &data);
+        write(&dir.path().join(format!("b/{i}.bin")), &data);
+    }
+    let mut engine = engine_with_folder(dir.path());
+
+    let cancel = AtomicBool::new(false);
+    let result = engine.scan_cancellable(
+        &|p| {
+            if p.phase == dupelens_core::ScanPhase::Analyzing && p.bytes_done > 0 {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        },
+        &cancel,
+    );
+    assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
+
+    // A complete scan afterwards still finds every pair.
+    engine.scan(&|_| {}).unwrap();
+    assert_eq!(engine.groups().unwrap().len(), 6);
+}
+
+#[test]
+fn progress_reports_bytes_to_read_and_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = filler(2_500_000, 3);
+    write(&dir.path().join("x/clip.bin"), &data);
+    write(&dir.path().join("y/clip.bin"), &data);
+    write(&dir.path().join("only-one.bin"), &filler(123_457, 4)); // never read
+    let mut engine = engine_with_folder(dir.path());
+
+    let last = Mutex::new((0u64, 0u64));
+    engine
+        .scan(&|p| {
+            if p.phase == dupelens_core::ScanPhase::Analyzing && p.bytes_total > 0 {
+                *last.lock().unwrap() = (p.bytes_done, p.bytes_total);
+            }
+        })
+        .unwrap();
+    let (done, total) = *last.lock().unwrap();
+    assert_eq!(total, 5_000_000, "only the twins are to be read");
+    assert_eq!(done, total, "the bar reaches the end");
+}
+
+#[test]
+fn hard_links_are_not_reported_as_duplicates() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(&root.join("one/report.pdf"), &filler(9_000, 7));
+    fs::create_dir_all(root.join("two")).unwrap();
+    fs::hard_link(root.join("one/report.pdf"), root.join("two/report.pdf")).unwrap();
+
+    let mut engine = engine_with_folder(root);
+    let summary = engine.scan(&|_| {}).unwrap();
+    assert_eq!(summary.hard_links_skipped, 1);
+    assert_eq!(summary.files_found, 1);
+    assert!(engine.groups().unwrap().is_empty());
+
+    // A genuine copy next to them is still found.
+    write(&root.join("three/report.pdf"), &filler(9_000, 7));
+    engine.scan(&|_| {}).unwrap();
+    let groups = engine.groups().unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].members.len(), 2);
+}
+
+#[test]
+fn a_cancelled_comparison_returns_cancelled() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = scene(400, 300, 3);
+    save(&a, &dir.path().join("a.png"), ImageFormat::Png);
+    save(
+        &a.resize_exact(200, 150, image::imageops::FilterType::Lanczos3),
+        &dir.path().join("b.jpg"),
+        ImageFormat::Jpeg,
+    );
+    let mut engine = engine_with_folder(dir.path());
+    engine.scan(&|_| {}).unwrap();
+
+    let cancel = AtomicBool::new(true);
+    assert!(matches!(
+        engine.groups_cancellable(&|_, _| {}, &cancel),
+        Err(Error::Cancelled)
+    ));
+    // Not cancelled: finds the pair, and reports its progress.
+    let steps = Mutex::new(Vec::new());
+    let groups = engine
+        .groups_cancellable(
+            &|d, t| steps.lock().unwrap().push((d, t)),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(steps.lock().unwrap().last(), Some(&(1, 1)));
+}
