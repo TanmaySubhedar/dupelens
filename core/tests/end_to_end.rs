@@ -378,3 +378,185 @@ fn shrunken_copy_of_a_small_capture_is_still_a_duplicate() {
     assert_eq!(groups.len(), 1, "quarter-size copy must be found");
     assert_eq!(groups[0].members.len(), 2);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Files that are not photos: exact matching only, read as little as possible.
+// ---------------------------------------------------------------------------------------------
+
+/// `n` bytes of deterministic filler that differs per `seed`.
+fn filler(n: usize, seed: u8) -> Vec<u8> {
+    (0..n)
+        .map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed))
+        .collect()
+}
+
+fn write(path: &Path, bytes: &[u8]) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, bytes).unwrap();
+}
+
+fn engine_with_folder(root: &Path) -> Engine {
+    let engine = Engine::open_in_memory().unwrap();
+    engine.add_folder(root).unwrap();
+    engine
+}
+
+#[test]
+fn identical_files_of_any_type_are_exact_duplicates() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let video = filler(400_000, 1);
+    write(&root.join("Videos/clip.mkv"), &video);
+    write(&root.join("Downloads/clip.mkv"), &video);
+    let report = filler(5_000, 2);
+    write(&root.join("Documents/report.pdf"), &report);
+    write(&root.join("Desktop/report (1).pdf"), &report);
+    write(&root.join("Music/song.mp3"), &filler(3_000, 3)); // unique size and content
+
+    let mut engine = engine_with_folder(root);
+    let summary = engine.scan(&|_| {}).unwrap();
+    assert_eq!(summary.files_found, 5);
+    assert_eq!(
+        summary.files_analyzed, 4,
+        "only the four twins are read in full"
+    );
+    assert_eq!(summary.bytes_read, 2 * 400_000 + 2 * 5_000);
+    assert_eq!(
+        summary.files_without_twin, 1,
+        "the song has no possible twin"
+    );
+
+    let groups = engine.groups().unwrap();
+    assert_eq!(groups.len(), 2, "{groups:#?}");
+    assert!(groups.iter().all(|g| g.kind == GroupKind::Exact));
+    // Largest reclaimable space first.
+    assert_eq!(groups[0].reclaimable_bytes, 400_000);
+
+    // For the PDFs, the original name is kept and the "(1)" copy is suggested for deletion.
+    let pdf = groups
+        .iter()
+        .find(|g| g.reclaimable_bytes == 5_000)
+        .unwrap();
+    let keep = pdf
+        .members
+        .iter()
+        .find(|m| m.file.id == pdf.recommended_id)
+        .unwrap();
+    assert_eq!(name(&keep.file.path), "report.pdf");
+}
+
+#[test]
+fn same_size_different_content_is_not_a_duplicate() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // Differ at the very start: told apart by the cheap fingerprint, never read in full.
+    write(&root.join("a.bin"), &filler(300_000, 1));
+    write(&root.join("b.bin"), &filler(300_000, 2));
+    // Differ only in the middle: the fingerprint matches, so the full hash must decide.
+    let mut m1 = filler(300_000, 5);
+    let mut m2 = m1.clone();
+    m1[150_000] = 1;
+    m2[150_000] = 2;
+    write(&root.join("c.bin"), &m1);
+    write(&root.join("d.bin"), &m2);
+
+    let mut engine = engine_with_folder(root);
+    let summary = engine.scan(&|_| {}).unwrap();
+    // a.bin, b.bin, c.bin and d.bin share one size, so all four are fingerprinted; only c and d
+    // match each other on it and so are read in full.
+    assert_eq!(summary.files_analyzed, 2);
+    assert_eq!(summary.files_without_twin, 2);
+    assert!(engine.groups().unwrap().is_empty());
+}
+
+#[test]
+fn a_file_with_no_twin_is_hashed_once_a_twin_appears() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let data = filler(80_000, 9);
+    write(&root.join("original.zip"), &data);
+
+    let mut engine = engine_with_folder(root);
+    let first = engine.scan(&|_| {}).unwrap();
+    assert_eq!((first.files_analyzed, first.files_without_twin), (0, 1));
+    assert!(engine.groups().unwrap().is_empty());
+
+    // Nothing changed: still nothing is read.
+    let again = engine.scan(&|_| {}).unwrap();
+    assert_eq!((again.files_analyzed, again.files_unchanged), (0, 1));
+
+    // A copy arrives. The untouched original now needs a hash too.
+    write(&root.join("backup/original.zip"), &data);
+    let third = engine.scan(&|_| {}).unwrap();
+    assert_eq!(third.files_unchanged, 1);
+    assert_eq!(third.files_analyzed, 2);
+    let groups = engine.groups().unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].members.len(), 2);
+
+    // And once hashed, an unchanged pair is not read again.
+    let fourth = engine.scan(&|_| {}).unwrap();
+    assert_eq!((fourth.files_analyzed, fourth.files_unchanged), (0, 2));
+    assert_eq!(engine.groups().unwrap().len(), 1);
+}
+
+#[test]
+fn a_non_photo_copy_of_a_photo_is_an_exact_duplicate() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    save(
+        &scene(300, 200, 2),
+        &root.join("pics/holiday.png"),
+        ImageFormat::Png,
+    );
+    fs::copy(root.join("pics/holiday.png"), root.join("pics/holiday.bak")).unwrap();
+
+    let mut engine = engine_with_folder(root);
+    engine.scan(&|_| {}).unwrap();
+    let groups = engine.groups().unwrap();
+    assert_eq!(groups.len(), 1, "{groups:#?}");
+    assert_eq!(groups[0].members.len(), 2);
+}
+
+#[test]
+fn deleting_a_non_photo_duplicate_works_and_keeps_the_other() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let data = filler(10_000, 4);
+    write(&root.join("a/notes.docx"), &data);
+    write(&root.join("b/notes.docx"), &data);
+
+    let mut engine = engine_with_folder(root);
+    engine.scan(&|_| {}).unwrap();
+    let groups = engine.groups().unwrap();
+    let ids = groups[0].default_deletion();
+    let report = engine.delete(&ids, DeleteMode::Permanent).unwrap();
+    assert_eq!(report.bytes_freed, 10_000);
+    let remaining = [root.join("a/notes.docx"), root.join("b/notes.docx")]
+        .iter()
+        .filter(|p| p.exists())
+        .count();
+    assert_eq!(remaining, 1);
+}
+
+#[test]
+fn an_old_database_is_upgraded_without_losing_folders() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("old.db");
+    {
+        // A version-1 database: hashes were required, and the user had picked a folder.
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE folders (path TEXT PRIMARY KEY, added_at INTEGER NOT NULL);
+             CREATE TABLE files (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE,
+                 size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, sha256 TEXT NOT NULL,
+                 scan_id INTEGER NOT NULL);
+             INSERT INTO folders VALUES ('/kept', 0);
+             INSERT INTO files VALUES (1, '/kept/a.jpg', 1, 1, 'x', 1);
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+    }
+    let engine = Engine::open(&db).unwrap();
+    assert_eq!(engine.folders().unwrap(), vec![PathBuf::from("/kept")]);
+}

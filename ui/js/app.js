@@ -226,7 +226,7 @@ function showResults() {
 function summaryLine() {
   const s = state.lastSummary;
   if (!s) return null;
-  const parts = [`${plural(s.files_found, 'photo')} scanned`];
+  const parts = [`${plural(s.files_found, 'file')} scanned`];
   if (s.files_unchanged) parts.push(`${s.files_unchanged.toLocaleString()} unchanged since last time`);
   if (s.unreadable_count) parts.push(`${plural(s.unreadable_count, 'file')} couldn’t be read`);
   return h('p', { class: 'muted' }, `${parts.join(' · ')}.`, s.missing_folders.map((f) => h('span', { class: 'warn' }, ` Folder not found (skipped): ${f}.`)));

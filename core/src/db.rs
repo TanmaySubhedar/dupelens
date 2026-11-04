@@ -8,7 +8,8 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-const SCHEMA_VERSION: i64 = 1;
+/// 2: `files.sha256` may be NULL (a file whose size is unique needs no hash).
+const SCHEMA_VERSION: i64 = 2;
 
 pub fn open(path: &Path) -> Result<Connection> {
     init(Connection::open(path)?)
@@ -19,6 +20,12 @@ pub fn open_in_memory() -> Result<Connection> {
 }
 
 fn init(conn: Connection) -> Result<Connection> {
+    // The file tables are a cache of what a scan read, so an older layout is simply dropped and
+    // refilled by the next scan. The selected folders are kept.
+    let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if version != 0 && version < SCHEMA_VERSION {
+        conn.execute_batch("DROP TABLE IF EXISTS files; DROP TABLE IF EXISTS local_differences;")?;
+    }
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;
@@ -31,7 +38,7 @@ fn init(conn: Connection) -> Result<Connection> {
              path      TEXT NOT NULL UNIQUE,
              size      INTEGER NOT NULL,
              mtime_ns  INTEGER NOT NULL,
-             sha256    TEXT NOT NULL,
+             sha256    TEXT,
              ahash     INTEGER,
              dhash     INTEGER,
              phash     INTEGER,
@@ -105,10 +112,13 @@ pub struct Fingerprint {
     pub id: i64,
     pub size: u64,
     pub mtime_ns: i64,
+    /// Whether the file has been hashed. A file whose size was unique has not been.
+    pub hashed: bool,
 }
 
 pub fn fingerprints(conn: &Connection) -> Result<HashMap<PathBuf, Fingerprint>> {
-    let mut stmt = conn.prepare("SELECT path, id, size, mtime_ns FROM files")?;
+    let mut stmt =
+        conn.prepare("SELECT path, id, size, mtime_ns, sha256 IS NOT NULL FROM files")?;
     let rows = stmt.query_map([], |r| {
         Ok((
             PathBuf::from(r.get::<_, String>(0)?),
@@ -116,6 +126,7 @@ pub fn fingerprints(conn: &Connection) -> Result<HashMap<PathBuf, Fingerprint>> 
                 id: r.get(1)?,
                 size: r.get::<_, i64>(2)? as u64,
                 mtime_ns: r.get(3)?,
+                hashed: r.get(4)?,
             },
         ))
     })?;
@@ -171,6 +182,38 @@ pub fn upsert(
     Ok(())
 }
 
+/// Records a file that needed no hash because no other file has its size. It cannot be part of
+/// a duplicate group, so it is kept only to make the next scan skip it quickly.
+pub fn upsert_unhashed(
+    conn: &Connection,
+    path: &Path,
+    size: u64,
+    mtime_ns: i64,
+    scan_id: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO files (path, size, mtime_ns, sha256, scan_id)
+         VALUES (?1, ?2, ?3, NULL, ?4)
+         ON CONFLICT(path) DO UPDATE SET
+             size = excluded.size, mtime_ns = excluded.mtime_ns, sha256 = NULL,
+             ahash = NULL, dhash = NULL, phash = NULL, width = NULL, height = NULL,
+             sharpness = NULL, exif_tags = 0, taken_at = NULL, favorite = 0,
+             scan_id = excluded.scan_id",
+        params![path_str(path), size as i64, mtime_ns, scan_id],
+    )?;
+    Ok(())
+}
+
+/// Stores the hash of a file that was recorded without one, because another file of the same
+/// size has since appeared.
+pub fn set_hash(conn: &Connection, id: i64, sha256: &str, scan_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE files SET sha256 = ?1, scan_id = ?2 WHERE id = ?3",
+        params![sha256, scan_id, id],
+    )?;
+    Ok(())
+}
+
 /// Forgets files not seen in the given scan (deleted, moved, or in a folder no longer selected).
 pub fn prune_unseen(conn: &Connection, scan_id: i64) -> Result<usize> {
     Ok(conn.execute("DELETE FROM files WHERE scan_id != ?1", [scan_id])?)
@@ -220,8 +263,8 @@ pub fn prune_local_differences(conn: &Connection, method: i64) -> Result<()> {
     conn.execute(
         "DELETE FROM local_differences
          WHERE method != ?1
-            OR sha_a NOT IN (SELECT sha256 FROM files)
-            OR sha_b NOT IN (SELECT sha256 FROM files)",
+            OR sha_a NOT IN (SELECT sha256 FROM files WHERE sha256 IS NOT NULL)
+            OR sha_b NOT IN (SELECT sha256 FROM files WHERE sha256 IS NOT NULL)",
         [method],
     )?;
     Ok(())
@@ -255,8 +298,11 @@ fn file_from_row(r: &Row) -> rusqlite::Result<FileRecord> {
     })
 }
 
+/// Every file that could be part of a duplicate group, i.e. every hashed file.
 pub fn all_files(conn: &Connection) -> Result<Vec<FileRecord>> {
-    let mut stmt = conn.prepare(&format!("SELECT {FILE_COLUMNS} FROM files ORDER BY id"))?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {FILE_COLUMNS} FROM files WHERE sha256 IS NOT NULL ORDER BY id"
+    ))?;
     let rows = stmt.query_map([], file_from_row)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
@@ -264,7 +310,7 @@ pub fn all_files(conn: &Connection) -> Result<Vec<FileRecord>> {
 pub fn file_by_id(conn: &Connection, id: i64) -> Result<Option<FileRecord>> {
     Ok(conn
         .query_row(
-            &format!("SELECT {FILE_COLUMNS} FROM files WHERE id = ?1"),
+            &format!("SELECT {FILE_COLUMNS} FROM files WHERE id = ?1 AND sha256 IS NOT NULL"),
             [id],
             file_from_row,
         )

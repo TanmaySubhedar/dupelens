@@ -3,6 +3,7 @@
 //! Nothing here touches the network. Files are only opened for reading until the user
 //! explicitly asks [`Engine::delete`] to remove specific files.
 
+pub mod category;
 #[cfg(feature = "cli")]
 pub mod cli;
 pub mod db;
@@ -18,6 +19,7 @@ pub mod service;
 pub use error::{Error, Result};
 pub use grouping::GroupingConfig;
 pub use model::{DuplicateGroup, FileRecord, GroupKind, GroupMember};
+pub use scanner::ScanOptions;
 
 use rayon::prelude::*;
 use rusqlite::Connection;
@@ -44,8 +46,16 @@ pub struct ScanProgress {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ScanSummary {
     pub files_found: usize,
-    /// Files that were new or changed and therefore re-analysed.
+    /// Files that were new or changed and were read in full: photos (analysed) and other files
+    /// that might have an identical twin (hashed).
     pub files_analyzed: usize,
+    /// Files that are not photos and could not have an exact twin (no other file has their
+    /// size, or none that matches on the first and last 64 KiB), so they were not read in full.
+    pub files_without_twin: usize,
+    /// Total size of the files read in full during this scan.
+    pub bytes_read: u64,
+    /// Cloud-only files (e.g. OneDrive "Files On-Demand") left alone so they are not downloaded.
+    pub cloud_only_skipped: usize,
     /// Files whose cached analysis was reused because size and mtime were unchanged.
     pub files_unchanged: usize,
     /// Database entries removed because the file no longer exists in a selected folder.
@@ -82,9 +92,19 @@ pub const fn trash_supported() -> bool {
     ))
 }
 
+/// One file to be read in full during a scan.
+struct Job {
+    file: scanner::DiscoveredFile,
+    /// The database row of a file already known without a hash; `None` for a new or changed file.
+    existing_id: Option<i64>,
+    /// Photos get the full analysis; everything else is only hashed.
+    photo: bool,
+}
+
 pub struct Engine {
     conn: Connection,
     pub grouping: GroupingConfig,
+    pub scan_options: ScanOptions,
 }
 
 impl Engine {
@@ -95,6 +115,7 @@ impl Engine {
         Ok(Self {
             conn: db::open(db_path)?,
             grouping: GroupingConfig::default(),
+            scan_options: ScanOptions::default(),
         })
     }
 
@@ -102,6 +123,7 @@ impl Engine {
         Ok(Self {
             conn: db::open_in_memory()?,
             grouping: GroupingConfig::default(),
+            scan_options: ScanOptions::default(),
         })
     }
 
@@ -137,6 +159,17 @@ impl Engine {
     }
 
     /// Scans the selected folders (and only those). Unchanged files reuse cached results.
+    ///
+    /// Photos are always read and analysed in full, for look-alike matching. Every other file
+    /// takes part in exact matching only, and is read as little as possible:
+    /// 1. a file whose size no other file shares cannot have a twin, so it is never read;
+    /// 2. files that share a size are compared by a cheap fingerprint of their first and last
+    ///    64 KiB;
+    /// 3. only files that still match (or share a size with a file already hashed) are read in
+    ///    full and hashed.
+    ///
+    /// This keeps a library of large videos and music cheap to scan: only real or very likely
+    /// duplicates are ever read end to end.
     pub fn scan(&mut self, progress: &(dyn Fn(ScanProgress) + Sync)) -> Result<ScanSummary> {
         let folders = self.folders()?;
         if folders.is_empty() {
@@ -151,11 +184,18 @@ impl Engine {
             done: 0,
             total: 0,
         });
-        let discovery = scanner::discover(&present);
+        let discovery = scanner::discover(&present, &self.scan_options);
         summary.files_found = discovery.files.len();
+        summary.cloud_only_skipped = discovery.cloud_only;
         summary.unreadable = discovery.skipped;
 
         let known = db::fingerprints(&self.conn)?;
+        let mut size_count: HashMap<u64, usize> = HashMap::new();
+        for f in &discovery.files {
+            *size_count.entry(f.size).or_default() += 1;
+        }
+        let shares_size = |f: &scanner::DiscoveredFile| size_count[&f.size] > 1;
+
         let (unchanged, changed): (Vec<_>, Vec<_>) = discovery.files.into_iter().partition(|f| {
             known
                 .get(&f.path)
@@ -163,24 +203,109 @@ impl Engine {
         });
         summary.files_unchanged = unchanged.len();
 
-        let total = changed.len();
+        // Sizes of files that are (or are about to be) fully hashed anyway.
+        let mut hashed_sizes: HashSet<u64> = HashSet::new();
+        let mut jobs: Vec<Job> = Vec::new();
+        let mut candidates: Vec<(scanner::DiscoveredFile, Option<i64>)> = Vec::new();
+        let mut unhashed_new: Vec<scanner::DiscoveredFile> = Vec::new();
+        let mut seen_ids: Vec<i64> = Vec::new();
+
+        for f in unchanged {
+            let k = &known[&f.path];
+            if k.hashed {
+                hashed_sizes.insert(f.size);
+                seen_ids.push(k.id);
+            } else if shares_size(&f) {
+                // Was unique before; another file of its size has appeared since.
+                candidates.push((f, Some(k.id)));
+            } else {
+                summary.files_without_twin += 1;
+                seen_ids.push(k.id);
+            }
+        }
+        for f in changed {
+            if scanner::is_image(&f.path) {
+                hashed_sizes.insert(f.size);
+                jobs.push(Job {
+                    file: f,
+                    existing_id: None,
+                    photo: true,
+                });
+            } else if shares_size(&f) {
+                candidates.push((f, None));
+            } else {
+                summary.files_without_twin += 1;
+                unhashed_new.push(f);
+            }
+        }
+
+        // Step 2: a cheap fingerprint of every candidate that shares its size with another file.
+        progress(ScanProgress {
+            phase: ScanPhase::Analyzing,
+            done: 0,
+            total: 0,
+        });
+        let fingerprinted: Vec<_> = candidates
+            .into_par_iter()
+            .map(|(f, id)| {
+                let r = hashing::partial_hash(&f.path, f.size);
+                (f, id, r)
+            })
+            .collect();
+        let mut same_partial: HashMap<(u64, &str), usize> = HashMap::new();
+        for (f, _, r) in &fingerprinted {
+            if let Ok(h) = r {
+                *same_partial.entry((f.size, h.as_str())).or_default() += 1;
+            }
+        }
+        let needs_full: Vec<bool> = fingerprinted
+            .iter()
+            .map(|(f, _, r)| match r {
+                Ok(h) => hashed_sizes.contains(&f.size) || same_partial[&(f.size, h.as_str())] > 1,
+                Err(_) => false,
+            })
+            .collect();
+        for ((f, id, r), full) in fingerprinted.into_iter().zip(needs_full) {
+            match (r, full) {
+                (Err(_), _) => summary.unreadable.push(f.path),
+                (Ok(_), true) => jobs.push(Job {
+                    file: f,
+                    existing_id: id,
+                    photo: false,
+                }),
+                (Ok(_), false) => {
+                    summary.files_without_twin += 1;
+                    match id {
+                        Some(id) => seen_ids.push(id),
+                        None => unhashed_new.push(f),
+                    }
+                }
+            }
+        }
+
+        // Step 3: read in full.
+        let total = jobs.len();
         let done = AtomicUsize::new(0);
         progress(ScanProgress {
             phase: ScanPhase::Analyzing,
             done: 0,
             total,
         });
-        let analysed: Vec<_> = changed
+        let analysed: Vec<_> = jobs
             .into_par_iter()
-            .map(|f| {
-                let result = metadata::analyze(&f.path, f.size);
+            .map(|job| {
+                let result = if job.photo {
+                    metadata::analyze(&job.file.path, job.file.size)
+                } else {
+                    metadata::analyze_plain(&job.file.path)
+                };
                 let n = done.fetch_add(1, Ordering::Relaxed) + 1;
                 progress(ScanProgress {
                     phase: ScanPhase::Analyzing,
                     done: n,
                     total,
                 });
-                (f, result)
+                (job, result)
             })
             .collect();
 
@@ -191,16 +316,30 @@ impl Engine {
         });
         let tx = self.conn.transaction()?;
         let scan_id = db::next_scan_id(&tx)?;
-        for f in &unchanged {
-            db::mark_seen(&tx, known[&f.path].id, scan_id)?;
+        for id in seen_ids {
+            db::mark_seen(&tx, id, scan_id)?;
         }
-        for (f, result) in analysed {
+        for f in &unhashed_new {
+            db::upsert_unhashed(&tx, &f.path, f.size, f.mtime_ns, scan_id)?;
+        }
+        for (job, result) in analysed {
             match result {
                 Ok(a) => {
-                    db::upsert(&tx, &f.path, f.size, f.mtime_ns, &a, scan_id)?;
+                    match job.existing_id {
+                        Some(id) => db::set_hash(&tx, id, &a.sha256, scan_id)?,
+                        None => db::upsert(
+                            &tx,
+                            &job.file.path,
+                            job.file.size,
+                            job.file.mtime_ns,
+                            &a,
+                            scan_id,
+                        )?,
+                    }
                     summary.files_analyzed += 1;
+                    summary.bytes_read += job.file.size;
                 }
-                Err(_) => summary.unreadable.push(f.path),
+                Err(_) => summary.unreadable.push(job.file.path),
             }
         }
         summary.files_removed = db::prune_unseen(&tx, scan_id)?;

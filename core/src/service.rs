@@ -14,6 +14,7 @@
 //! Results are cached so that thumbnails and repeated `groups` calls never wait on the
 //! database.
 
+use crate::category::Category;
 use crate::{metadata, DeleteMode, DuplicateGroup, Engine, GroupKind, ScanPhase, ScanSummary};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -118,6 +119,12 @@ pub struct UiScanSummary {
     pub files_found: usize,
     pub files_analyzed: usize,
     pub files_unchanged: usize,
+    /// Files that are not photos and had no possible exact twin, so were never read in full.
+    pub files_without_twin: usize,
+    /// Total size of the files read in full.
+    pub bytes_read: u64,
+    /// Cloud-only files left alone so they are not downloaded.
+    pub cloud_only_skipped: usize,
     pub files_removed: usize,
     pub unreadable_count: usize,
     pub missing_folders: Vec<String>,
@@ -125,7 +132,7 @@ pub struct UiScanSummary {
     pub reclaimable_bytes: u64,
 }
 
-/// A photo as the UI sees it. Paths are strings (lossy for the rare non-UTF-8 name) so the
+/// A file as the UI sees it. Paths are strings (lossy for the rare non-UTF-8 name) so the
 /// JSON never fails to serialise.
 #[derive(Debug, Clone, Serialize)]
 pub struct UiFile {
@@ -133,7 +140,10 @@ pub struct UiFile {
     pub path: String,
     pub name: String,
     pub folder: String,
+    pub category: Category,
     pub size: u64,
+    /// Last-modified time, in whole seconds since the Unix epoch.
+    pub modified_secs: i64,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub taken_at: Option<String>,
@@ -146,6 +156,8 @@ pub struct UiFile {
 pub struct UiGroup {
     pub id: i64,
     pub kind: GroupKind,
+    /// The kind of file the group holds (that of its first member).
+    pub category: Category,
     pub recommended_id: i64,
     pub reason: String,
     pub reclaimable_bytes: u64,
@@ -170,7 +182,9 @@ impl From<&DuplicateGroup> for UiGroup {
                         .parent()
                         .map(|d| d.to_string_lossy().into_owned())
                         .unwrap_or_default(),
+                    category: Category::from_path(p),
                     size: m.file.size,
+                    modified_secs: m.file.mtime_ns / 1_000_000_000,
                     width: m.file.width,
                     height: m.file.height,
                     taken_at: m.file.taken_at.clone(),
@@ -183,6 +197,10 @@ impl From<&DuplicateGroup> for UiGroup {
         Self {
             id: g.id,
             kind: g.kind,
+            category: g
+                .members
+                .first()
+                .map_or(Category::Other, |m| Category::from_path(&m.file.path)),
             recommended_id: g.recommended_id,
             reason: g.reason.clone(),
             reclaimable_bytes: g.reclaimable_bytes,
@@ -393,6 +411,9 @@ impl Service {
             files_found: s.files_found,
             files_analyzed: s.files_analyzed,
             files_unchanged: s.files_unchanged,
+            files_without_twin: s.files_without_twin,
+            bytes_read: s.bytes_read,
+            cloud_only_skipped: s.cloud_only_skipped,
             files_removed: s.files_removed,
             unreadable_count: s.unreadable.len(),
             missing_folders: s

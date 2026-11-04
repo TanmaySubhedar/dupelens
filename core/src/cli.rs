@@ -163,7 +163,7 @@ fn folders(engine: &Engine, action: FolderAction) -> Result<()> {
 
 fn scan(engine: &mut Engine) -> Result<()> {
     let summary = engine.scan(&|p| match p.phase {
-        ScanPhase::Discovering => eprint!("\rLooking for photos..."),
+        ScanPhase::Discovering => eprint!("\rLooking for files..."),
         ScanPhase::Analyzing if p.total > 0 && (p.done % 25 == 0 || p.done == p.total) => {
             eprint!("\rAnalysing {}/{}        ", p.done, p.total)
         }
@@ -172,9 +172,25 @@ fn scan(engine: &mut Engine) -> Result<()> {
     })?;
     eprintln!();
     println!(
-        "{} photos found: {} analysed, {} unchanged since last scan, {} no longer present.",
-        summary.files_found, summary.files_analyzed, summary.files_unchanged, summary.files_removed
+        "{} files found: {} read ({}), {} unchanged since last scan, {} no longer present.",
+        summary.files_found,
+        summary.files_analyzed,
+        human_bytes(summary.bytes_read),
+        summary.files_unchanged,
+        summary.files_removed
     );
+    if summary.files_without_twin > 0 {
+        println!(
+            "{} other files have no possible exact twin and were not read in full.",
+            summary.files_without_twin
+        );
+    }
+    if summary.cloud_only_skipped > 0 {
+        println!(
+            "{} cloud-only files were left alone so they are not downloaded.",
+            summary.cloud_only_skipped
+        );
+    }
     for f in &summary.missing_folders {
         println!("Warning: folder not found (skipped): {}", f.display());
     }

@@ -14,9 +14,34 @@ pub fn sha256_bytes(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+/// How much of each end of a file [`partial_hash`] reads.
+pub const PARTIAL_CHUNK: u64 = 64 * 1024;
+
+/// A cheap fingerprint of a file's first and last 64 KiB, mixed with its length. Two files with
+/// different partial hashes cannot be identical, so only files that share one need a full read.
+/// Reading both ends matters: containers such as ZIP and MP4 keep their index at the end.
+pub fn partial_hash(path: &std::path::Path, size: u64) -> std::io::Result<String> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    hasher.update(size.to_le_bytes());
+    let mut buf = vec![0u8; PARTIAL_CHUNK as usize];
+    let head = size.min(PARTIAL_CHUNK) as usize;
+    file.read_exact(&mut buf[..head])?;
+    hasher.update(&buf[..head]);
+    if size > PARTIAL_CHUNK {
+        // The tail may overlap the head for files under 128 KiB; that is fine.
+        let tail = size.min(PARTIAL_CHUNK) as usize;
+        file.seek(SeekFrom::Start(size - tail as u64))?;
+        file.read_exact(&mut buf[..tail])?;
+        hasher.update(&buf[..tail]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 pub fn sha256_reader(mut reader: impl Read) -> std::io::Result<String> {
     let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 1 << 16];
+    let mut buf = vec![0u8; 1 << 20];
     loop {
         let n = reader.read(&mut buf)?;
         if n == 0 {
@@ -212,6 +237,51 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         assert_eq!(sha256_reader(&b"abc"[..]).unwrap(), sha256_bytes(b"abc"));
+    }
+
+    #[test]
+    fn partial_hash_sees_both_ends_of_a_large_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = vec![7u8; 300_000];
+        let path_a = dir.path().join("a");
+        std::fs::write(&path_a, &a).unwrap();
+        let same = dir.path().join("same");
+        std::fs::write(&same, &a).unwrap();
+        // Differ only in the very last byte, far from the start.
+        *a.last_mut().unwrap() = 8;
+        let tail = dir.path().join("tail");
+        std::fs::write(&tail, &a).unwrap();
+        // Differ only in the middle: invisible to a partial hash, caught by the full one.
+        let mut m = vec![7u8; 300_000];
+        m[150_000] = 9;
+        let mid = dir.path().join("mid");
+        std::fs::write(&mid, &m).unwrap();
+
+        let p = |path: &std::path::Path| partial_hash(path, 300_000).unwrap();
+        assert_eq!(p(&path_a), p(&same));
+        assert_ne!(p(&path_a), p(&tail));
+        assert_eq!(
+            p(&path_a),
+            p(&mid),
+            "middle bytes are not part of the partial hash"
+        );
+    }
+
+    #[test]
+    fn partial_hash_handles_small_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tiny");
+        std::fs::write(&path, b"hello").unwrap();
+        assert_eq!(
+            partial_hash(&path, 5).unwrap(),
+            partial_hash(&path, 5).unwrap()
+        );
+        let other = dir.path().join("tiny2");
+        std::fs::write(&other, b"hellp").unwrap();
+        assert_ne!(
+            partial_hash(&path, 5).unwrap(),
+            partial_hash(&other, 5).unwrap()
+        );
     }
 
     #[test]
