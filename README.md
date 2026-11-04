@@ -6,7 +6,7 @@ rest, and cleans up when you confirm. Nothing is ever uploaded.
 
 **Current scope: photos get look-alike matching; every other file type (videos, music, documents,
 archives, anything) gets exact-copy matching** ([why](docs/decisions/0013-exact-matching-for-every-file-type.md)).
-The pages still say "photos" in places while the interface is redesigned ([docs/UI.md](docs/UI.md)).
+The interface was redesigned for 0.2, in light and dark ([docs/UI.md](docs/UI.md)). See the [changelog](CHANGELOG.md).
 
 ## What it promises
 
@@ -26,7 +26,7 @@ The pages still say "photos" in places while the interface is redesigned ([docs/
 
 | Part | State |
 |---|---|
-| Rust core engine (`core/`) | Built and tested: 31 unit + 13 end-to-end tests pass |
+| Rust core engine (`core/`) | Built and tested: 55 unit + 33 end-to-end tests pass |
 | **The app, `dupelens`** (`desktop/`, Tauri) | **The main program.** Opens a native window; `dupelens <command>` in a terminal runs the CLI commands. Scan flow and previews tested in the real window |
 | UI (`ui/`) | Plain HTML/CSS/JS shown by the app. Works, but the visual design is being redone |
 | `dupelens-cli` (`core/src/bin/`) | The same commands without a window, for servers and minimal Linux where the app can't start. See [docs/UI.md](docs/UI.md) for the UI contract |
