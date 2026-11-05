@@ -28,7 +28,7 @@ Last updated: 2026-10-07. Decisions behind this plan are in [decisions/](decisio
    ([0015](decisions/0015-deletion-history-and-undo.md)). Left for after 0.2.0 ships: try the
    Linux build, README screenshots. Watch mode and HEIC are v0.3.
 3. **v0.3: Tauri desktop app** showing the v0.1 UI (`desktop/` already exists and is the main program); installers.
-4. **Later: Android** via Tauri 2 (see blockers below). **Phase 3** AI similarity (CLIP/SigLIP/DINOv2).
+4. **Next after 0.2: Android** ([0016](decisions/0016-android-app.md): a Kotlin plugin for the system calls, built in CI; first a debug APK of the current pages). **Phase 3** AI similarity (CLIP/SigLIP/DINOv2).
 
 Ideas: **watch mode** (flag new duplicates as files arrive), showing exact duplicates first
 while look-alike analysis continues, scan cancellation.
@@ -37,8 +37,12 @@ while look-alike analysis continues, scan cancellation.
 - [0005](decisions/0005-recommendation-rules.md): should a favourite always be kept? Is the
   batch-action interpretation right?
 - HEIC (iPhone) photos only match when byte-identical. Acceptable for now?
-- Android Phase 2: request Google Play's restricted "All files access", or only work with
-  files picked through the system picker?
+- Android: confirm the two flavours in [0016](decisions/0016-android-app.md): a direct APK with
+  "All files access" and our own trash folder, and a Google Play version limited to photos and
+  videos with the system trash. (Replaces the old "All files access or system picker" question.)
+- Phones connected by USB cannot be scanned from the desktop (they appear as MTP devices, not
+  folders). The app shows no helpful message yet; a clear message and a README note are
+  planned for a patch release. The Android app is the real answer.
 - Which GitHub account and org hosts the public repo?
 
 ## Platform blockers (summary)
@@ -47,4 +51,4 @@ while look-alike analysis continues, scan cancellation.
 | Windows | ✅ | Flutter path: MSVC Build Tools need admin. Tauri: builds locally without MSVC (Zig workarounds); release builds should still use MSVC on CI. |
 | Linux | ✅ (verified in Debian container) | Must build on Linux (or WSL/CI). The app needs WebKitGTK (present on practically all desktop Linux; packaging declares it). |
 | macOS | Expected ✅ (untested) | Needs a Mac or CI to build; Apple signing and notarisation. |
-| Android | ❓ not compiled (needs NDK) | Deleting other apps' photos needs Android's system delete/trash requests (Kotlin side); "selected photos only" permission; long scans need a foreground service; Phase 2 needs a restricted permission or the system picker. |
+| Android | ❓ not compiled (needs NDK; to be built in CI, [0016](decisions/0016-android-app.md)) | Deleting other apps' photos needs Android's system delete/trash requests (Kotlin plugin); "selected photos only" permission; long scans need a foreground service; Google Play reviews the broad file permissions (the APK route avoids that). |

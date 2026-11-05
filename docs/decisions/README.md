@@ -29,6 +29,7 @@ are without reading the code or old chats.
 | [0013](0013-exact-matching-for-every-file-type.md) | Exact matching for every file type, reading as little as possible | Accepted | 2026-11-04 |
 | [0014](0014-tunable-matching.md) | Tunable matching presets; cancel, byte progress and hard-link detection | Accepted | 2026-11-04 |
 | [0015](0015-deletion-history-and-undo.md) | Deletion history, undo from the Recycle Bin, lifetime total | Accepted | 2026-11-04 |
+| [0016](0016-android-app.md) | Android app: a Kotlin plugin for the system calls, built in CI | Accepted (flavours proposed) | 2026-11-05 |
 
 See also: [ROADMAP](../ROADMAP.md) for what's next and open questions, and
 [PRD-v1](../PRD-v1.md) for the original product requirements.
