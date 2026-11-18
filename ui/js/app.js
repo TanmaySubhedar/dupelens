@@ -130,7 +130,7 @@ async function showOverview() {
     state.folders = await call('folders');
     state.settings = await call('get_settings');
     state.storage = isAndroid()
-      ? await storageStatus().catch(() => ({ supported: true, granted: true }))
+      ? await storageStatus().catch(() => ({ supported: true, granted: false }))
       : { supported: false, granted: true };
     state.suggested = await call('suggested_folders').catch(() => []);
     state.stats = await call('stats').catch(() => null);
