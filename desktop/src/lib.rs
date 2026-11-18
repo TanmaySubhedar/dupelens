@@ -14,7 +14,7 @@
 use dupelens_core::service::{ApiError, ErrorKind, Service};
 use dupelens_core::Engine;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{http, Manager, State};
 use tauri_plugin_dupelens_device::DeviceExt;
 
@@ -66,6 +66,15 @@ fn browse_root() -> Option<PathBuf> {
     }
 }
 
+/// True when `here` is `root` or below it and contains no `..` step. Because no `..` is
+/// allowed, the lexical parent of an accepted path is also inside (or equal to) the root.
+fn is_inside_root(here: &Path, root: &Path) -> bool {
+    here.starts_with(root)
+        && !here
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+}
+
 /// Lists the sub-folders of `path` (or of the root), for the in-app folder browser. Only
 /// names are read, nothing inside the files; hidden folders (starting with a dot) are left out.
 fn browse_folder(path: Option<&str>) -> Result<Value, ApiError> {
@@ -76,7 +85,8 @@ fn browse_folder(path: Option<&str>) -> Result<Value, ApiError> {
         .map(PathBuf::from)
         .unwrap_or_else(|| root.clone());
     // Never browse above the root: the page has no business listing the system folders.
-    if !here.starts_with(&root) {
+    // `starts_with` compares words lexically, so a `..` would slip past it; refuse those.
+    if !is_inside_root(&here, &root) {
         return Err(ApiError::new(
             ErrorKind::BadRequest,
             "that folder is outside the storage area",
@@ -237,4 +247,20 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("the DupeLens app failed to start");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_inside_root;
+    use std::path::Path;
+
+    #[test]
+    fn browse_stays_inside_the_root() {
+        let root = Path::new("/storage/emulated/0");
+        assert!(is_inside_root(root, root));
+        assert!(is_inside_root(Path::new("/storage/emulated/0/DCIM/Camera"), root));
+        assert!(!is_inside_root(Path::new("/storage/emulated"), root));
+        assert!(!is_inside_root(Path::new("/storage/emulated/0/../../.."), root));
+        assert!(!is_inside_root(Path::new("/storage/emulated/0/DCIM/../.."), root));
+    }
 }
