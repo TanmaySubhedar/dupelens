@@ -29,6 +29,10 @@ jobs:
 
       - name: Install the Android SDK command-line tools
         uses: android-actions/setup-android@v3
+        with:
+          # The runner already has the SDK. The action's default extra package ("tools")
+          # no longer exists in current command-line tools and fails the step.
+          packages: ""
 
       - name: Install the Android platform, build tools and NDK
         # The NDK is Google's C/C++ compiler for Android. The engine needs it because its
