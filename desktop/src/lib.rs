@@ -31,14 +31,18 @@ fn api(
         // Only these well-known locations are listed; nothing is read from them.
         "suggested_folders" => {
             let paths = app.path();
-            let candidates = [
+            let mut candidates = vec![
                 ("Pictures", paths.picture_dir()),
                 ("Downloads", paths.download_dir()),
-                ("Desktop", paths.desktop_dir()),
+            ];
+            // A phone has no Desktop folder (Tauri only offers the lookup on desktop).
+            #[cfg(desktop)]
+            candidates.push(("Desktop", paths.desktop_dir()));
+            candidates.extend([
                 ("Documents", paths.document_dir()),
                 ("Videos", paths.video_dir()),
                 ("Music", paths.audio_dir()),
-            ];
+            ]);
             let found: Vec<Value> = candidates
                 .into_iter()
                 .filter_map(|(name, dir)| {
