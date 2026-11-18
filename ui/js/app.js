@@ -3,10 +3,12 @@
 // No browser popups (alert/confirm/prompt): some Tauri webviews don't support them, so
 // dialogs are drawn in the page. Design: docs/UI.md ("Visual design").
 
-import { ApiError, browseFolder, call, openStorageSettings, pickFolder, storageStatus, thumbUrl } from './api.js';
+import { ApiError, call, openStorageSettings, pickFolder, storageStatus, thumbUrl } from './api.js';
 import { h, mount } from './dom.js';
 import { byCategory, categoryName, dimensions, formatBytes, nextMilestone, plural } from './format.js';
 import { Selection } from './selection.js';
+import { closeTopLayer, popLayer, pushLayer } from './layers.js';
+import { createPhone } from './phone.js';
 
 const main = document.getElementById('main');
 const GROUPS_PER_PAGE = 30;
@@ -64,21 +66,38 @@ function preview(file, { large = false, cls = 'thumb' } = {}) {
   return img;
 }
 
-/** An in-page modal. Resolves when closed; Escape and the backdrop close it. */
-function modal(build) {
+/**
+ * An in-page modal. Resolves when closed; Escape and the backdrop close it. `sheet` slides it up
+ * from the bottom, `full` fills the screen. On the phone it is a layer, so the Back button
+ * closes it (and closing it from the page goes through the same path).
+ */
+function modal(build, { sheet = false, full = false } = {}) {
   return new Promise((resolve) => {
     const previous = document.activeElement;
-    const close = (value) => {
+    let result = null;
+    let closing = false;
+    const finish = () => {
       backdrop.remove();
       document.removeEventListener('keydown', onKey);
       previous?.focus?.();
-      resolve(value);
+      resolve(result);
+    };
+    const close = (value = null) => {
+      if (closing) return;
+      closing = true;
+      result = value;
+      if (isAndroid()) closeTopLayer();
+      else finish();
     };
     const onKey = (e) => e.key === 'Escape' && close(null);
-    const dialog = h('div', { class: 'dialog', role: 'dialog', 'aria-modal': 'true' }, build(close));
-    const backdrop = h('div', { class: 'backdrop', onclick: (e) => e.target === backdrop && close(null) }, dialog);
+    const dialog = h('div', { class: `dialog${full ? ' full' : ''}`, role: 'dialog', 'aria-modal': 'true' }, build(close));
+    const backdrop = h('div', {
+      class: `backdrop${sheet ? ' sheet' : ''}${full ? ' full' : ''}`,
+      onclick: (e) => e.target === backdrop && close(null),
+    }, dialog);
     document.addEventListener('keydown', onKey);
     document.body.append(backdrop);
+    if (isAndroid()) pushLayer(finish);
     dialog.querySelector('button, input')?.focus();
   });
 }
@@ -107,7 +126,7 @@ function renderNav() {
     }, label);
   mount(document.getElementById('nav'),
     item('overview', 'Overview'),
-    item('results', 'Results', state.groups.length === 0),
+    item('results', 'Results'),
     item('settings', 'Settings'));
 }
 
@@ -130,7 +149,7 @@ async function showOverview() {
     state.folders = await call('folders');
     state.settings = await call('get_settings');
     state.storage = isAndroid()
-      ? await storageStatus().catch(() => ({ supported: true, granted: false }))
+      ? await storageStatus().catch((e) => { showError(e); return { supported: true, granted: false }; })
       : { supported: false, granted: true };
     state.suggested = await call('suggested_folders').catch(() => []);
     state.stats = await call('stats').catch(() => null);
@@ -153,8 +172,8 @@ function introPanel() {
   return h('section', { class: 'panel' },
     h('h1', {}, s ? 'No duplicates found' : 'Find duplicate files'),
     h('p', { class: 'lead' }, s
-      ? `${plural(s.files_found, 'file')} checked. Nothing in these folders matches at the current setting.`
-      : 'Choose the folders to look in. DupeLens only reads them, works entirely offline, and never deletes anything until you confirm.'),
+      ? (isAndroid() ? `${plural(s.files_found, 'file')} checked.` : `${plural(s.files_found, 'file')} checked. Nothing in these folders matches at the current setting.`)
+      : (isAndroid() ? 'Pick folders to scan.' : 'Choose the folders to look in. DupeLens only reads them, works entirely offline, and never deletes anything until you confirm.')),
     state.stats && state.stats.bytes_freed > 0 && h('p', { class: 'muted small' },
       `Freed so far with DupeLens: `, h('span', { class: 'num' }, formatBytes(state.stats.bytes_freed))));
 }
@@ -166,7 +185,9 @@ function reclaimPanel() {
   return h('section', { class: 'panel' },
     h('h2', {}, 'Space you can reclaim'),
     h('div', { class: 'hero-number' }, formatBytes(total)),
-    h('p', { class: 'muted' }, `${plural(state.groups.length, 'group')} of duplicates, ${plural(files, 'file')} in all. Nothing is deleted until you review it.`),
+    h('p', { class: 'muted' }, isAndroid()
+      ? `${plural(state.groups.length, 'group')} · ${plural(files, 'file')}`
+      : `${plural(state.groups.length, 'group')} of duplicates, ${plural(files, 'file')} in all. Nothing is deleted until you review it.`),
     h('div', { class: 'typebar', role: 'img', 'aria-label': 'Reclaimable space by file type' },
       rows.map((r) => h('span', { class: `t-${r.key}`, title: `${categoryName(r.key)}: ${formatBytes(r.bytes)}`, dataset: { grow: String(r.bytes) } }))),
     h('table', { class: 'types' },
@@ -200,19 +221,17 @@ function needsStorageAccess() {
 function accessPanel() {
   const recheck = (button) => busy(button, async () => {
     await showOverview();
-    if (needsStorageAccess()) toast('Access is still off. Turn on “Allow access to manage all files”, then come back.', 'warn');
+    if (needsStorageAccess()) toast('Still off', 'warn');
   });
   return h('section', { class: 'panel' },
-    h('h2', {}, 'Allow access to your files'),
-    h('p', {}, 'To look for duplicates, DupeLens must be allowed to read the folders on this phone. Android keeps that switched off until you allow it.'),
+    h('h2', {}, 'Allow file access'),
     h('ol', { class: 'access-steps' },
-      h('li', {}, 'Tap “Open Android settings” below.'),
-      h('li', {}, 'Turn on “Allow access to manage all files” for DupeLens.'),
-      h('li', {}, 'Come back to this app.')),
-    h('p', { class: 'muted small' }, 'DupeLens only reads files while scanning, works entirely offline, and never deletes anything until you confirm.'),
+      h('li', {}, 'Open settings'),
+      h('li', {}, 'Turn on “Allow access to manage all files”'),
+      h('li', {}, 'Come back')),
     h('div', { class: 'row' },
-      h('button', { class: 'primary big', onclick: (e) => busy(e.currentTarget, () => openStorageSettings()) }, 'Open Android settings'),
-      h('button', { onclick: (e) => recheck(e.currentTarget) }, 'I’ve turned it on')));
+      h('button', { class: 'primary big', onclick: (e) => busy(e.currentTarget, () => openStorageSettings()) }, 'Open settings'),
+      h('button', { onclick: (e) => recheck(e.currentTarget) }, 'Check again')));
 }
 
 // Coming back from Android's settings page, look again, so the person does not have to press
@@ -248,7 +267,7 @@ function foldersPanel() {
   return h('section', { class: 'panel' },
     h('h2', {}, 'Folders'),
     state.folders.length === 0
-      ? h('p', { class: 'muted' }, 'No folders yet. Pick the places where duplicates tend to build up.')
+      ? (isAndroid() ? null : h('p', { class: 'muted' }, 'No folders yet. Pick the places where duplicates tend to build up.'))
       : h('ul', { class: 'folder-list' }, state.folders.map((f) => h('li', {},
         h('span', { class: 'folder-path', title: f }, f),
         h('button', { class: 'icon', title: 'Remove this folder', 'aria-label': `Remove ${f}`, onclick: (e) => busy(e.currentTarget, () => removeFolder(f)) }, 'Remove')))),
@@ -310,39 +329,28 @@ async function applyPendingPreset() {
 
 async function chooseFolder() {
   // A phone has no native dialog that hands back a plain path, so it gets the page's own browser.
-  const path = isAndroid() ? await browseFolders() : await pickFolder();
+  if (isAndroid()) {
+    const paths = await phone.browseFolders();
+    if (paths?.length) await addFolders(paths);
+    return;
+  }
+  const path = await pickFolder();
   if (path) await addFolder(path);
 }
 
-/** A small folder browser: tap a folder to go in, "Add this folder" to choose where you are. */
-function browseFolders() {
-  const body = h('div', { class: 'browser' });
-  return modal((close) => {
-    const open = async (path) => {
-      mount(body, h('p', { class: 'muted' }, 'Loading…'));
-      let listing;
-      try {
-        listing = await browseFolder(path);
-      } catch (e) {
-        mount(body,
-          h('p', { class: 'err-text' }, e.message),
-          h('div', { class: 'dialog-buttons' }, h('button', { onclick: () => close(null) }, 'Close')));
-        return;
-      }
-      mount(body,
-        h('h2', {}, 'Choose a folder'),
-        h('div', { class: 'browser-path' }, listing.path),
-        h('ul', { class: 'browser-list' },
-          listing.parent && h('li', {}, h('button', { class: 'browser-row', onclick: () => open(listing.parent) }, h('span', {}, '← Up one folder'))),
-          listing.folders.map((f) => h('li', {}, h('button', { class: 'browser-row', onclick: () => open(f.path) }, h('span', { class: 'name' }, f.name), h('span', { class: 'muted' }, '›')))),
-          listing.folders.length === 0 && h('li', { class: 'empty' }, 'No folders in here.')),
-        h('div', { class: 'dialog-buttons' },
-          h('button', { onclick: () => close(null) }, 'Cancel'),
-          h('button', { class: 'primary', onclick: () => close(listing.path) }, 'Add this folder')));
-    };
-    open(null);
-    return [body];
-  });
+async function addFolders(paths) {
+  let added = 0;
+  for (const path of paths) {
+    try {
+      await call('add_folder', { path });
+      added += 1;
+    } catch (e) {
+      showError(e);
+    }
+  }
+  state.folders = await call('folders');
+  renderOverview();
+  if (added > 0) toast(`Added ${plural(added, 'folder')}`);
 }
 
 async function addFolder(path) {
@@ -388,7 +396,7 @@ function showScan({ steps = STEPS, title = 'Scanning', note = 'Files that haven�
   const cancelButton = h('button', { onclick: (e) => busy(e.currentTarget, () => call('cancel')) }, 'Cancel');
   mount(main, h('section', { class: 'panel narrow' },
     h('h2', {}, title), percent, bar, counts, list,
-    h('p', { class: 'muted small' }, note),
+    !isAndroid() && h('p', { class: 'muted small' }, note),
     h('p', {}, cancelButton)));
 
   const tick = async () => {
@@ -461,6 +469,7 @@ function shownGroups() {
 }
 
 function showResults() {
+  if (isAndroid()) return phone.showResults();
   enter('results');
   if (state.groups.length === 0) {
     mount(main, h('section', { class: 'panel narrow center' },
@@ -691,6 +700,7 @@ function viewLarge(group, file) {
 
 /** Keyboard: arrows move between copies, K keeps, D deletes, Space shows full size. */
 function onKeys(e) {
+  if (isAndroid()) return;
   if (state.screen !== 'results' || e.ctrlKey || e.metaKey || e.altKey) return;
   if (document.querySelector('.backdrop')) return;
   const t = e.target;
@@ -811,6 +821,7 @@ async function doDelete(marked, permanent) {
     forgetResults();
     showError(e);
   }
+  if (isAndroid()) return phone.afterDelete(report);
   const stats = await call('stats').catch(() => null);
   showDone(report, permanent, stats, freedByType);
 }
@@ -954,7 +965,32 @@ function renderSettings() {
       h('p', { class: 'row' }, h('button', { onclick: (e) => busy(e.currentTarget, () => saveSize(e.currentTarget)) }, 'Save'))),
     h('section', { class: 'panel' },
       h('h2', {}, 'About'),
-      h('p', { class: 'muted' }, `DupeLens ${state.info.version ?? ''}. Everything runs on this computer: no account, no upload, no tracking. Your folder list, scan results and history are kept in one local database.`))));
+      h('p', { class: 'muted' }, isAndroid() ? `DupeLens ${state.info.version ?? ''}. Works offline.` : `DupeLens ${state.info.version ?? ''}. Everything runs on this computer: no account, no upload, no tracking. Your folder list, scan results and history are kept in one local database.`))));
+}
+
+// ---------- phone ----------
+
+const phone = createPhone({
+  state, main, h, mount, call, enter, toast, busy, showError, preview, modal, perPage: GROUPS_PER_PAGE,
+  formatBytes, plural, categoryName, visibleGroups, factRows, doDelete, startScan, showOverview,
+});
+
+/**
+ * Android's Back button: close the top-most preview, sheet or dialog; otherwise go back to the
+ * overview; from the overview, leave the app. (One history entry is kept in reserve so Back
+ * reaches this handler instead of closing the app at once.)
+ */
+function wireBackButton() {
+  history.pushState({ root: true }, '');
+  window.addEventListener('popstate', () => {
+    if (popLayer()) return;
+    if (state.screen === 'overview') {
+      call('quit').catch(() => {});
+      return;
+    }
+    history.pushState({ root: true }, '');
+    if (state.screen !== 'scan') showOverview(); // mid-scan, Cancel is the button for it
+  });
 }
 
 // ---------- start-up ----------
@@ -964,6 +1000,8 @@ async function start() {
   try {
     state.info = await call('info');
     document.getElementById('version').textContent = `v${state.info.version}`;
+    state.selection.emptyStart = isAndroid(); // a phone starts with nothing selected
+    if (isAndroid()) wireBackButton();
     const status = await call('scan_status');
     if (status.state === 'running') return showScan();
     state.lastSummary = status.state === 'done' ? status.summary : null;

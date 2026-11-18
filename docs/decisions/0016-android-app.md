@@ -91,9 +91,16 @@ These are from general knowledge, not checked in this project, and Google change
    trash and untrash, media-ID lookup and the media rescan.
 3. Add the trash-backend interface to the engine, with the desktop Recycle Bin as its first
    implementation, then the Android one.
-4. Touch layout for the pages. *First pass done:* bottom navigation, 44 px tap targets, a pinned
-   delete bar, filters that scroll sideways. A tap on a photo toggles it; the full-size button is
-   always visible. There is still no preview pane on a phone (a bottom sheet is the plan).
+4. Touch layout for the pages. *Done for a first real test (`ui/js/phone.js`, Android only; the
+   desktop pages are unchanged):* bottom navigation and 44 px tap targets; results as a gallery
+   grid, one row per group that scrolls sideways; nothing selected at the start, a tap ticks a
+   photo and a "Select duplicates" action ticks all but the best copy of each group; a selection
+   bar (count, size, Delete); a full-screen preview (the diagonal-arrows icon) with pinch and
+   double-tap zoom, swipe sideways between the copies, swipe up from the bottom for the details
+   and swipe down to close; one short delete confirmation instead of the Review page; a folder
+   browser with tick boxes (several folders, across folders); the Back button closes the top
+   layer, then goes to the overview, then leaves. **Deleting stays permanent on Android until
+   step 3 gives it a trash folder** (a decision for the first test builds, to be revisited).
 5. Decide the flavours (item 5), then: for Play, the closed test, listing and permission
    declarations; for the APK, signing and a download page.
 

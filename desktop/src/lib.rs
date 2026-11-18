@@ -258,9 +258,18 @@ mod tests {
     fn browse_stays_inside_the_root() {
         let root = Path::new("/storage/emulated/0");
         assert!(is_inside_root(root, root));
-        assert!(is_inside_root(Path::new("/storage/emulated/0/DCIM/Camera"), root));
+        assert!(is_inside_root(
+            Path::new("/storage/emulated/0/DCIM/Camera"),
+            root
+        ));
         assert!(!is_inside_root(Path::new("/storage/emulated"), root));
-        assert!(!is_inside_root(Path::new("/storage/emulated/0/../../.."), root));
-        assert!(!is_inside_root(Path::new("/storage/emulated/0/DCIM/../.."), root));
+        assert!(!is_inside_root(
+            Path::new("/storage/emulated/0/../../.."),
+            root
+        ));
+        assert!(!is_inside_root(
+            Path::new("/storage/emulated/0/DCIM/../.."),
+            root
+        ));
     }
 }
