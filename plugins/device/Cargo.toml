@@ -1,0 +1,17 @@
+[package]
+name = "tauri-plugin-dupelens-device"
+description = "DupeLens: the Android-only system calls (storage permission, screen insets). Decision 0016."
+version = "0.2.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+# `links` is how Tauri's build finds this crate's android/ folder and adds it to the app.
+links = "tauri-plugin-dupelens-device"
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }

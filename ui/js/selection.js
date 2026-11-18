@@ -18,6 +18,9 @@ export class Selection {
   constructor(groups = []) {
     this.groups = [];
     this.marked = new Map();
+    // The phone starts with nothing selected, like a gallery; "Select duplicates" then applies
+    // the recommended default on request. The desktop pre-selects it (the PRD's default).
+    this.emptyStart = false;
     this.load(groups);
   }
 
@@ -32,9 +35,10 @@ export class Selection {
     for (const g of groups) {
       const ids = new Set(g.members.map((m) => m.id));
       const old = keepPrevious ? previous.get(g.id) : undefined;
-      const kept = old ? new Set([...old].filter((id) => ids.has(id))) : defaultDeletion(g);
+      const fresh = this.emptyStart ? new Set() : defaultDeletion(g);
+      const kept = old ? new Set([...old].filter((id) => ids.has(id))) : fresh;
       // Never start with every copy marked.
-      this.marked.set(g.id, kept.size >= ids.size ? defaultDeletion(g) : kept);
+      this.marked.set(g.id, kept.size >= ids.size ? fresh : kept);
     }
   }
 

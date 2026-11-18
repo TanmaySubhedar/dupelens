@@ -64,6 +64,7 @@ p { margin: 0 0 .75rem; }
 
 /* ---------- controls ---------- */
 button, input, select { font: inherit; color: inherit; }
+button, select, label { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
 button {
   border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface);
   padding: .4rem .85rem; cursor: pointer; line-height: 1.4;
@@ -148,6 +149,122 @@ table.types { width: 100%; border-collapse: collapse; }
 .pending-note { color: var(--accent); font-size: .8rem; margin: 0 0 .5rem; }
 .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
 
+.access-steps { margin: 0 0 .9rem; padding-left: 1.3rem; display: grid; gap: .3rem; }
+.err-text { color: var(--danger); overflow-wrap: anywhere; }
+
+/* ---------- phone: shared bits ---------- */
+.svg-icon { display: block; flex: none; }
+.ibtn {
+  display: inline-flex; align-items: center; justify-content: center; flex: none; width: 44px; height: 44px; min-height: 44px;
+  padding: 0; border: 0; border-radius: 50%; background: none; color: var(--text);
+}
+.ibtn:hover:not(:disabled) { border: 0; background: var(--border); }
+.ibtn.active { color: var(--accent); }
+.pad { padding: 1rem; }
+
+/* sheets (slide up from the bottom) and full-screen dialogs */
+.backdrop.sheet { align-items: flex-end; padding: 0; }
+.backdrop.sheet .dialog { width: 100%; max-width: none; border-radius: 16px 16px 0 0; border-bottom: 0; padding: 1rem; animation: sheet-up .18s ease-out; }
+@keyframes sheet-up { from { transform: translateY(40px); opacity: .6; } to { transform: none; opacity: 1; } }
+.backdrop.full { padding: 0; align-items: stretch; }
+.dialog.full { display: flex; flex-direction: column; width: 100%; max-width: none; height: 100%; max-height: none; padding: 0; border: 0; border-radius: 0; overflow: hidden; }
+.sheet-title { margin: 0 0 .15rem; font-size: 1.1rem; }
+.p-minis { display: flex; align-items: center; gap: .4rem; margin: .5rem 0 1rem; }
+.p-minis .mini { width: 56px; height: 56px; object-fit: cover; }
+.p-filter .chips { margin: 0 0 .9rem; }
+
+/* ---------- phone: results ---------- */
+main:has(.p-results) { padding: 0 0 calc(var(--nav-h, 0px) + 1rem); }
+.p-bar {
+  position: sticky; top: 48px; z-index: 5; display: flex; align-items: center; gap: .3rem; min-height: 56px;
+  padding: .25rem .75rem; background: var(--bg); border-bottom: 1px solid var(--border);
+}
+.p-bar.selecting { background: var(--accent-soft); border-bottom-color: var(--accent); padding-left: .25rem; }
+.p-bar .spacer { flex: 1; }
+.p-bar .danger { display: inline-flex; align-items: center; gap: .35rem; }
+.p-bar .danger .svg-icon { width: 20px; height: 20px; }
+.p-count { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.p-count .muted { font-size: .8rem; }
+.p-groups { display: flex; flex-direction: column; gap: 1.1rem; padding: .75rem .75rem 1rem; }
+.p-ghead { display: flex; align-items: baseline; gap: .6rem; margin-bottom: .4rem; font-size: .9rem; }
+.p-ghead .muted { font-size: .85rem; }
+.p-sim {
+  margin-left: auto; font-size: .7rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--muted); border: 1px solid var(--border); padding: .05rem .4rem; border-radius: 2px;
+}
+/* One row per group; it scrolls sideways when the copies do not fit. */
+.p-strip { display: flex; gap: .5rem; overflow-x: auto; scroll-snap-type: x proximity; padding-bottom: .25rem; }
+.p-tile {
+  position: relative; flex: none; width: min(42vw, 200px); aspect-ratio: 1; scroll-snap-align: start;
+  border-radius: 6px; overflow: hidden; background: var(--border); cursor: pointer;
+  user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+}
+.p-tile .thumb { width: 100%; height: 100%; object-fit: cover; transition: transform .12s; -webkit-user-drag: none; }
+.p-tile.selected { outline: 2px solid var(--accent); outline-offset: -2px; background: var(--accent-soft); }
+.p-tile.selected .thumb { transform: scale(.86); border-radius: 6px; }
+.p-check {
+  position: absolute; left: 6px; top: 6px; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center;
+  border: 2px solid #fff; border-radius: 50%; background: rgb(0 0 0 / 30%); color: transparent;
+}
+.p-check .svg-icon { width: 16px; height: 16px; }
+.p-tile.selected .p-check { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.p-best {
+  position: absolute; left: 0; bottom: 0; padding: .1rem .45rem; font-size: .68rem; font-weight: 600;
+  letter-spacing: .06em; text-transform: uppercase; background: var(--surface); color: var(--text);
+}
+.p-expand {
+  position: absolute; right: 4px; top: 4px; width: 36px; height: 36px; min-height: 36px; padding: 0; border: 0; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center; background: rgb(0 0 0 / 45%); color: #fff;
+}
+.p-expand:hover:not(:disabled) { border: 0; }
+.p-expand .svg-icon { width: 18px; height: 18px; }
+
+/* ---------- phone: full-screen preview ---------- */
+.pv { position: fixed; inset: 0; z-index: 40; display: flex; flex-direction: column; background: #000; color: #fff; user-select: none; -webkit-user-select: none; }
+.pv-top { position: relative; z-index: 2; display: flex; align-items: center; justify-content: space-between; padding: .25rem .5rem; }
+.pv .ibtn { color: #fff; }
+.pv .ibtn:hover:not(:disabled) { background: rgb(255 255 255 / 15%); }
+.pv-pick.on { background: var(--accent); color: var(--on-accent); }
+.pv-counter { font: .85rem var(--mono); opacity: .85; }
+.pv-stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; overflow: hidden; touch-action: none; }
+.pv-img { max-width: 100%; max-height: 100%; object-fit: contain; transform-origin: center; will-change: transform; pointer-events: none; -webkit-user-drag: none; }
+.pv .no-preview { width: 60vw; height: 40vh; background: #1c1c1c; color: #999; }
+.pv-handle { flex: none; display: flex; justify-content: center; align-items: flex-start; height: 44px; min-height: 44px; padding: 12px 0 0; border: 0; border-radius: 0; background: none; }
+.pv-handle span, .pv-grab span { display: block; width: 44px; height: 5px; border-radius: 3px; background: rgb(255 255 255 / 55%); }
+.pv-info {
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 3; max-height: 70%; overflow-y: auto;
+  background: var(--surface); color: var(--text); border-radius: 16px 16px 0 0; padding-bottom: 1rem;
+  transform: translateY(100%); visibility: hidden; transition: transform .2s ease-out, visibility 0s .2s;
+}
+.pv-info.open { transform: none; visibility: visible; transition: transform .2s ease-out; }
+.pv-grab { display: flex; justify-content: center; width: 100%; min-height: 44px; padding: .8rem 0 .4rem; border: 0; border-radius: 0; background: none; touch-action: none; }
+.pv-grab span { background: var(--border); }
+.pv-body { padding: 0 1rem 1rem; }
+.pv-body h3 { margin: 0 0 .7rem; font-size: 1rem; font-weight: 600; overflow-wrap: anywhere; }
+
+/* ---------- phone: folder browser ---------- */
+.browser { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.b-head { display: flex; align-items: center; gap: .25rem; min-height: 56px; padding: .25rem .5rem; border-bottom: 1px solid var(--border); }
+.b-gap { width: 44px; flex: none; }
+.b-title { font-size: 1.1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.b-list { flex: 1; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
+.b-row { display: flex; align-items: stretch; border-bottom: 1px solid var(--border); }
+.b-pick {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: .8rem; min-height: 56px; padding: 0 .5rem 0 1rem;
+  border: 0; border-radius: 0; background: none; text-align: left;
+}
+.b-pick .name { font-size: 1rem; white-space: normal; overflow-wrap: anywhere; }
+.b-check {
+  flex: none; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center;
+  border: 2px solid var(--muted); border-radius: 50%; color: transparent;
+}
+.b-check .svg-icon { width: 16px; height: 16px; }
+.b-row.on .b-check { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.b-row.added .b-pick { opacity: .55; }
+.b-row.added .b-check { background: var(--muted); border-color: var(--muted); color: var(--bg); }
+.b-row .ibtn { align-self: center; width: 56px; height: 56px; border-radius: 0; }
+.browser > .dialog-buttons { padding: .75rem 1rem; border-top: 1px solid var(--border); }
+
 /* ---------- scanning ---------- */
 .percent { font: 500 3.25rem/1 var(--mono); letter-spacing: -.02em; margin: .5rem 0; }
 .bar { height: 6px; background: var(--border); border-radius: 2px; overflow: hidden; }
@@ -217,6 +334,7 @@ table.types { width: 100%; border-collapse: collapse; }
   background: var(--surface); border-color: var(--border); opacity: 0;
 }
 .tile:hover .zoom, .tile:focus-within .zoom { opacity: 1; }
+@media (hover: none) { .zoom { opacity: 1; min-width: 36px; min-height: 36px; } }
 
 .pane { position: sticky; top: 140px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
 .pane-image { display: flex; align-items: center; justify-content: center; height: 280px; background: var(--border); }
@@ -290,14 +408,69 @@ kbd { font: .72rem var(--mono); border: 1px solid var(--border); border-radius: 
   .pane { display: none; }
   .review-list > li { grid-template-columns: 1fr; }
 }
+/* ---------- phone ----------
+   Bigger tap targets, the main navigation at the bottom where a thumb reaches it, and the
+   results' action bar pinned above it. The window is already inset below the status bar by
+   the Android plugin (plugins/device), so `fixed` here means "on the visible screen". */
 @media (max-width: 640px) {
+  :root { --nav-h: 56px; }
+  body { font-size: 15px; }
   .offline-note { display: none; }
+  .topbar { padding: 0 1rem; gap: 0; }
+  .nav {
+    position: fixed; left: 0; right: 0; bottom: 0; height: var(--nav-h); z-index: 8; gap: 0;
+    background: var(--surface); border-top: 1px solid var(--border);
+  }
+  .nav button {
+    flex: 1; padding: 0; font-size: .95rem; border-bottom: 0; border-top: 3px solid transparent;
+  }
+  .nav button.active, .nav button.active:hover { border-top-color: var(--accent); border-bottom-color: transparent; }
+  main { padding: 1rem .9rem calc(var(--nav-h) + 1.5rem); }
+  main:has(.toolbar-row.actions) { padding-bottom: calc(var(--nav-h) + 8.5rem); }
+  #toasts { left: .75rem; right: .75rem; bottom: calc(var(--nav-h) + .75rem); max-width: none; }
+
+  h1 { font-size: 1.35rem; }
+  .narrow { margin: 1rem auto; }
+  .panel { padding: 1rem; }
+  .hero-number, .freed { font-size: 2.4rem; }
+  .percent { font-size: 2.6rem; }
+
+  button { min-height: 44px; padding: .5rem 1rem; }
+  .link { min-height: 40px; }
+  .chip { min-height: 40px; padding: .35rem .9rem; }
+  .icon { min-width: 44px; }
+  input[type="text"], input[type="number"], select { min-height: 44px; font-size: 16px; }
+  .row .big, .review-buttons button { flex: 1 1 100%; }
+  .folder-list li { padding: .5rem 0; }
+  .preset { padding: .8rem; }
+  .field { grid-template-columns: 1fr; }
+  .field input { text-align: left; width: 100%; }
+  .option { padding: .8rem; }
+  .dialog { padding: .9rem; }
+  .dialog-buttons button { flex: 1; }
+
+  /* results: filters scroll sideways, the delete bar stays in reach */
+  .toolbar { position: static; padding: 0 0 .5rem; border-bottom: 0; margin-bottom: .5rem; }
+  .toolbar .chips { flex-wrap: nowrap; overflow-x: auto; width: 100%; padding-bottom: 4px; }
+  .toolbar .chip { flex: none; }
+  .toolbar-row.actions {
+    position: fixed; left: 0; right: 0; bottom: var(--nav-h); z-index: 7; gap: .4rem .6rem;
+    background: var(--surface); border-top: 1px solid var(--border); padding: .6rem .9rem;
+  }
+  .toolbar-row.actions .spacer { display: none; }
+  .toolbar-row.actions .tally { flex: 1 1 100%; }
+  .toolbar-row.actions .danger { flex: 1 1 100%; }
+  .group header { gap: .4rem; }
   .tile { width: calc(50% - .3rem); }
-  .toolbar { top: 48px; }
+  /* less to read: preset names only, and just Type and Reclaimable in the summary table */
+  .preset .muted { display: none; }
+  .types th:nth-child(2), .types td:nth-child(2), .types th:nth-child(3), .types td:nth-child(3) { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .bar .fill { transition: none; }
   .bar.indeterminate .fill { animation: none; width: 100%; opacity: .4; }
   .toast { transition: none; }
+  .backdrop.sheet .dialog { animation: none; }
+  .pv-info, .pv-info.open, .p-tile .thumb { transition: none; }
 }
