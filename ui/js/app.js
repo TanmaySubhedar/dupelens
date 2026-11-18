@@ -3,7 +3,7 @@
 // No browser popups (alert/confirm/prompt): some Tauri webviews don't support them, so
 // dialogs are drawn in the page. Design: docs/UI.md ("Visual design").
 
-import { ApiError, call, pickFolder, thumbUrl } from './api.js';
+import { ApiError, browseFolder, call, openStorageSettings, pickFolder, storageStatus, thumbUrl } from './api.js';
 import { h, mount } from './dom.js';
 import { byCategory, categoryName, dimensions, formatBytes, nextMilestone, plural } from './format.js';
 import { Selection } from './selection.js';
@@ -26,6 +26,7 @@ const state = {
   settings: null,
   pendingPreset: null, // chosen on the Overview but not applied yet
   suggested: [],
+  storage: { supported: false, granted: true }, // Android: may the app read the phone's files?
   stats: null,
   active: null, // { gid, fid }: the copy shown in the preview pane
 };
@@ -128,6 +129,9 @@ async function showOverview() {
   try {
     state.folders = await call('folders');
     state.settings = await call('get_settings');
+    state.storage = isAndroid()
+      ? await storageStatus().catch(() => ({ supported: true, granted: true }))
+      : { supported: false, granted: true };
     state.suggested = await call('suggested_folders').catch(() => []);
     state.stats = await call('stats').catch(() => null);
   } catch (e) {
@@ -183,7 +187,51 @@ function sizeTypeBar() {
   for (const s of segments) s.style.setProperty('flex', `${Number(s.dataset.grow) / total} 1 0`);
 }
 
+function isAndroid() {
+  return state.info.platform === 'android';
+}
+
+/** True on a phone where the person has not yet allowed DupeLens to read files. */
+function needsStorageAccess() {
+  return state.storage.supported && !state.storage.granted;
+}
+
+/** Android keeps files private until the person turns on "all files access" in its settings. */
+function accessPanel() {
+  const recheck = (button) => busy(button, async () => {
+    await showOverview();
+    if (needsStorageAccess()) toast('Access is still off. Turn on “Allow access to manage all files”, then come back.', 'warn');
+  });
+  return h('section', { class: 'panel' },
+    h('h2', {}, 'Allow access to your files'),
+    h('p', {}, 'To look for duplicates, DupeLens must be allowed to read the folders on this phone. Android keeps that switched off until you allow it.'),
+    h('ol', { class: 'access-steps' },
+      h('li', {}, 'Tap “Open Android settings” below.'),
+      h('li', {}, 'Turn on “Allow access to manage all files” for DupeLens.'),
+      h('li', {}, 'Come back to this app.')),
+    h('p', { class: 'muted small' }, 'DupeLens only reads files while scanning, works entirely offline, and never deletes anything until you confirm.'),
+    h('div', { class: 'row' },
+      h('button', { class: 'primary big', onclick: (e) => busy(e.currentTarget, () => openStorageSettings()) }, 'Open Android settings'),
+      h('button', { onclick: (e) => recheck(e.currentTarget) }, 'I’ve turned it on')));
+}
+
+// Coming back from Android's settings page, look again, so the person does not have to press
+// anything.
+let recheckingAccess = false;
+async function recheckAccessOnReturn() {
+  if (document.visibilityState === 'hidden' || state.screen !== 'overview' || !needsStorageAccess() || recheckingAccess) return;
+  recheckingAccess = true;
+  try {
+    await showOverview();
+  } finally {
+    recheckingAccess = false;
+  }
+}
+document.addEventListener('visibilitychange', recheckAccessOnReturn);
+window.addEventListener('focus', recheckAccessOnReturn);
+
 function foldersPanel() {
+  if (needsStorageAccess()) return accessPanel();
   const pathInput = h('input', { type: 'text', placeholder: 'Or paste a folder path', 'aria-label': 'Folder path', spellcheck: 'false' });
   const addTyped = async (button) => {
     if (!pathInput.value.trim()) return pathInput.focus();
@@ -206,7 +254,7 @@ function foldersPanel() {
         h('button', { class: 'icon', title: 'Remove this folder', 'aria-label': `Remove ${f}`, onclick: (e) => busy(e.currentTarget, () => removeFolder(f)) }, 'Remove')))),
     left.length > 0 && state.folders.length === 0 && h('div', { class: 'chips' }, left.map((s) =>
       h('button', { class: 'chip', title: s.path, onclick: (e) => busy(e.currentTarget, () => addFolder(s.path)) }, `+ ${s.name}`))),
-    h('div', { class: 'row' }, h('button', { onclick: (e) => busy(e.currentTarget, chooseFolder) }, 'Choose folder…')),
+    h('div', { class: 'row' }, h('button', { onclick: (e) => busy(e.currentTarget, chooseFolder) }, isAndroid() ? 'Browse folders…' : 'Choose folder…')),
     h('div', { class: 'path-row' }, pathInput, addButton));
 }
 
@@ -217,7 +265,7 @@ function matchingPanel() {
   const changed = state.pendingPreset != null && state.pendingPreset !== st?.preset;
   const presets = st ? st.presets.filter((p) => p.key !== 'custom' || st.preset === 'custom') : [];
   const rerun = h('button', { class: changed ? 'primary' : '', disabled: !changed, onclick: (e) => busy(e.currentTarget, rerunMatching) }, 'Re-run');
-  const scan = h('button', { class: hasResults ? '' : 'primary big', disabled: state.folders.length === 0, onclick: (e) => busy(e.currentTarget, startScan) },
+  const scan = h('button', { class: hasResults ? '' : 'primary big', disabled: state.folders.length === 0 || needsStorageAccess(), onclick: (e) => busy(e.currentTarget, startScan) },
     hasResults ? 'Scan folders again' : 'Scan for duplicates');
   return h('section', { class: 'panel' },
     h('h2', {}, 'What counts as a duplicate'),
@@ -261,8 +309,40 @@ async function applyPendingPreset() {
 }
 
 async function chooseFolder() {
-  const path = await pickFolder();
+  // A phone has no native dialog that hands back a plain path, so it gets the page's own browser.
+  const path = isAndroid() ? await browseFolders() : await pickFolder();
   if (path) await addFolder(path);
+}
+
+/** A small folder browser: tap a folder to go in, "Add this folder" to choose where you are. */
+function browseFolders() {
+  const body = h('div', { class: 'browser' });
+  return modal((close) => {
+    const open = async (path) => {
+      mount(body, h('p', { class: 'muted' }, 'Loading…'));
+      let listing;
+      try {
+        listing = await browseFolder(path);
+      } catch (e) {
+        mount(body,
+          h('p', { class: 'err-text' }, e.message),
+          h('div', { class: 'dialog-buttons' }, h('button', { onclick: () => close(null) }, 'Close')));
+        return;
+      }
+      mount(body,
+        h('h2', {}, 'Choose a folder'),
+        h('div', { class: 'browser-path' }, listing.path),
+        h('ul', { class: 'browser-list' },
+          listing.parent && h('li', {}, h('button', { class: 'browser-row', onclick: () => open(listing.parent) }, h('span', {}, '← Up one folder'))),
+          listing.folders.map((f) => h('li', {}, h('button', { class: 'browser-row', onclick: () => open(f.path) }, h('span', { class: 'name' }, f.name), h('span', { class: 'muted' }, '›')))),
+          listing.folders.length === 0 && h('li', { class: 'empty' }, 'No folders in here.')),
+        h('div', { class: 'dialog-buttons' },
+          h('button', { onclick: () => close(null) }, 'Cancel'),
+          h('button', { class: 'primary', onclick: () => close(listing.path) }, 'Add this folder')));
+    };
+    open(null);
+    return [body];
+  });
 }
 
 async function addFolder(path) {
@@ -439,7 +519,7 @@ function renderToolbar() {
       kind,
       h('div', { class: 'spacer' }),
       h('button', { class: 'link', title: 'Change on the Overview', onclick: showOverview }, `Matching: ${presetName()}`)),
-    h('div', { class: 'toolbar-row' },
+    h('div', { class: 'toolbar-row actions' },
     h('div', { class: 'tally' }, h('span', { class: 'num' }, plural(marked.length, 'file')), ' to delete · ', h('span', { class: 'num' }, formatBytes(state.selection.markedBytes()))),
     h('div', { class: 'spacer' }),
     h('button', { class: 'link', onclick: () => { state.selection.keepRecommended(visibleGroups()); refreshAll(); } }, `Keep recommended${scope}`),

@@ -3,7 +3,8 @@ resolver = "2"
 members = ["core"]
 # app/rust: built by Flutter (cargokit) once bindings are generated.
 # desktop: the Tauri app; its own lockfile and target dir, so the CLI build stays light.
-exclude = ["app/rust", "desktop"]
+# plugins/device: the Android Kotlin plugin, a dependency of desktop only (built with it).
+exclude = ["app/rust", "desktop", "plugins/device"]
 
 [workspace.package]
 version = "0.2.0"

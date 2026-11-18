@@ -11,10 +11,12 @@
 //!
 //! The page reaches this host only through `ui/js/api.js`. See docs/UI.md.
 
-use dupelens_core::service::{ApiError, Service};
+use dupelens_core::service::{ApiError, ErrorKind, Service};
 use dupelens_core::Engine;
 use serde_json::{json, Value};
+use std::path::PathBuf;
 use tauri::{http, Manager, State};
+use tauri_plugin_dupelens_device::DeviceExt;
 
 /// `async` so it runs off the main thread: scans, comparisons and the folder dialog must
 /// not freeze the window.
@@ -27,36 +29,134 @@ fn api(
 ) -> Result<Value, ApiError> {
     match cmd.as_str() {
         "pick_folder" => pick_folder(&app),
-        // The user's standard folders that exist, offered as one-click choices on first run.
-        // Only these well-known locations are listed; nothing is read from them.
-        "suggested_folders" => {
-            let paths = app.path();
-            let mut candidates = vec![
-                ("Pictures", paths.picture_dir()),
-                ("Downloads", paths.download_dir()),
-            ];
-            // A phone has no Desktop folder (Tauri only offers the lookup on desktop).
-            #[cfg(desktop)]
-            candidates.push(("Desktop", paths.desktop_dir()));
-            candidates.extend([
-                ("Documents", paths.document_dir()),
-                ("Videos", paths.video_dir()),
-                ("Music", paths.audio_dir()),
-            ]);
-            let found: Vec<Value> = candidates
-                .into_iter()
-                .filter_map(|(name, dir)| {
-                    let dir = dir.ok().filter(|d| d.is_dir())?;
-                    Some(json!({ "name": name, "path": dir.to_string_lossy() }))
-                })
-                .collect();
-            Ok(json!(found))
-        }
+        "suggested_folders" => Ok(json!(suggested_folders(&app))),
+        // Android only: may the app read the phone's files, and the page to allow it.
+        "storage_status" => app
+            .device()
+            .storage_status()
+            .map(|s| json!(s))
+            .map_err(|m| ApiError::new(ErrorKind::Failed, m)),
+        "open_storage_settings" => app
+            .device()
+            .open_storage_settings()
+            .map(|()| Value::Null)
+            .map_err(|m| ApiError::new(ErrorKind::Failed, m)),
+        // The in-app folder browser (a phone has no native dialog that returns paths).
+        "browse_folder" => browse_folder(args.get("path").and_then(Value::as_str)),
         "quit" => {
             app.exit(0);
             Ok(Value::Null)
         }
         _ => service.call(&cmd, args),
+    }
+}
+
+/// The top of what the in-app folder browser may show: the phone's shared storage on Android,
+/// the home folder elsewhere.
+fn browse_root() -> Option<PathBuf> {
+    if cfg!(target_os = "android") {
+        // Android sets EXTERNAL_STORAGE for every app; "/storage/emulated/0" is the usual value.
+        Some(PathBuf::from(
+            std::env::var("EXTERNAL_STORAGE").unwrap_or_else(|_| "/storage/emulated/0".into()),
+        ))
+    } else {
+        std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map(PathBuf::from)
+    }
+}
+
+/// Lists the sub-folders of `path` (or of the root), for the in-app folder browser. Only
+/// names are read, nothing inside the files; hidden folders (starting with a dot) are left out.
+fn browse_folder(path: Option<&str>) -> Result<Value, ApiError> {
+    let root = browse_root()
+        .ok_or_else(|| ApiError::new(ErrorKind::Failed, "cannot find the storage folder"))?;
+    let here = path
+        .filter(|p| !p.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.clone());
+    // Never browse above the root: the page has no business listing the system folders.
+    if !here.starts_with(&root) {
+        return Err(ApiError::new(
+            ErrorKind::BadRequest,
+            "that folder is outside the storage area",
+        ));
+    }
+    let entries = std::fs::read_dir(&here).map_err(|e| {
+        ApiError::new(
+            ErrorKind::Failed,
+            format!("cannot open {}: {e}. On Android, check that DupeLens is allowed to access all files.", here.display()),
+        )
+    })?;
+    let mut folders: Vec<(String, String)> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // `file_type` does not follow links, so a link to a folder is skipped on purpose:
+            // following it could list the same photos under two names.
+            (entry.file_type().ok()?.is_dir() && !name.starts_with('.'))
+                .then(|| (name, entry.path().to_string_lossy().into_owned()))
+        })
+        .collect();
+    folders.sort_by_key(|(name, _)| name.to_lowercase());
+    let parent = (here != root)
+        .then(|| here.parent().map(|p| p.to_string_lossy().into_owned()))
+        .flatten();
+    Ok(json!({
+        "path": here.to_string_lossy(),
+        "parent": parent,
+        "folders": folders.into_iter().map(|(name, path)| json!({ "name": name, "path": path })).collect::<Vec<_>>(),
+    }))
+}
+
+/// Well-known folders that exist, offered as one-click choices on first run. Only these
+/// locations are listed; nothing is read from them.
+fn suggested_folders(app: &tauri::AppHandle) -> Vec<Value> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = app;
+        // The folders where a phone keeps photos, videos and downloads.
+        let root = browse_root().unwrap_or_else(|| PathBuf::from("/storage/emulated/0"));
+        [
+            ("Camera", "DCIM/Camera"),
+            ("Pictures", "Pictures"),
+            ("Screenshots", "Pictures/Screenshots"),
+            ("Downloads", "Download"),
+            ("Videos", "Movies"),
+            ("WhatsApp", "Android/media/com.whatsapp/WhatsApp/Media"),
+            ("Documents", "Documents"),
+            ("Music", "Music"),
+        ]
+        .into_iter()
+        .filter_map(|(name, rel)| {
+            let dir = root.join(rel);
+            dir.is_dir()
+                .then(|| json!({ "name": name, "path": dir.to_string_lossy() }))
+        })
+        .collect()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let paths = app.path();
+        let mut candidates = vec![
+            ("Pictures", paths.picture_dir()),
+            ("Downloads", paths.download_dir()),
+        ];
+        // A phone has no Desktop folder (Tauri only offers the lookup on desktop).
+        #[cfg(desktop)]
+        candidates.push(("Desktop", paths.desktop_dir()));
+        candidates.extend([
+            ("Documents", paths.document_dir()),
+            ("Videos", paths.video_dir()),
+            ("Music", paths.audio_dir()),
+        ]);
+        candidates
+            .into_iter()
+            .filter_map(|(name, dir)| {
+                let dir = dir.ok().filter(|d| d.is_dir())?;
+                Some(json!({ "name": name, "path": dir.to_string_lossy() }))
+            })
+            .collect()
     }
 }
 
@@ -72,9 +172,9 @@ fn pick_folder(app: &tauri::AppHandle) -> Result<Value, ApiError> {
     Ok(json!(picked.map(|p| p.to_string_lossy().into_owned())))
 }
 
-// Android has no folder picker that hands back a plain path (its picker returns content://
-// addresses). Phone folders come from the suggested list until the plugin of decision 0016
-// exists; picking nothing is the honest answer meanwhile.
+// Android has no native folder picker that hands back a plain path (its picker returns
+// content:// addresses), so the page draws its own browser (`browse_folder`) and never calls
+// this there; picking nothing is the honest answer if it does.
 #[cfg(mobile)]
 fn pick_folder(_app: &tauri::AppHandle) -> Result<Value, ApiError> {
     Ok(Value::Null)
@@ -82,7 +182,7 @@ fn pick_folder(_app: &tauri::AppHandle) -> Result<Value, ApiError> {
 
 /// Everything both hosts share: plugins, the `api` command and the `thumb` image scheme.
 fn builder() -> tauri::Builder<tauri::Wry> {
-    let builder = tauri::Builder::default();
+    let builder = tauri::Builder::default().plugin(tauri_plugin_dupelens_device::init());
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_dialog::init());
     builder

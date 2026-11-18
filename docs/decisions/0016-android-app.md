@@ -79,15 +79,21 @@ These are from general knowledge, not checked in this project, and Google change
 
 ## Steps, in order
 1. Add a CI workflow that builds a debug APK of the current pages, and install it on a phone.
-   *In progress:* `desktop/` is now a library plus a thin program (Android loads the library),
-   and `.github/workflows/android.yml` builds the APK. **Not yet run**: the first CI run and the
-   phone test are still to do. On Android the folder picker returns nothing and the database
-   lives in the app's private data folder.
+   *Done:* `desktop/` is a library plus a thin program (Android loads the library), and
+   `.github/workflows/android.yml` builds the APK. The first build on a real phone showed the
+   pages load but are unusable: a pasted path was rejected as "not a folder" (without the files
+   permission Android answers "no" to everything outside the app's own folder), there was no way
+   to choose a folder, and the edge-to-edge window drew the top bar under the status bar.
+   *Started:* `plugins/device/` (Rust crate plus Kotlin) with the "All files access" check and
+   settings page, fitting the page between the system bars, and an in-app folder browser.
+   Foreground notification, trash, media-ID lookup and rescan are still to do.
 2. Build the plugin: permission prompt and foreground notification first (easiest to test), then
    trash and untrash, media-ID lookup and the media rescan.
 3. Add the trash-backend interface to the engine, with the desktop Recycle Bin as its first
    implementation, then the Android one.
-4. Touch layout for the pages.
+4. Touch layout for the pages. *First pass done:* bottom navigation, 44 px tap targets, a pinned
+   delete bar, filters that scroll sideways. A tap on a photo toggles it; the full-size button is
+   always visible. There is still no preview pane on a phone (a bottom sheet is the plan).
 5. Decide the flavours (item 5), then: for Play, the closed test, listing and permission
    declarations; for the APK, signing and a download page.
 
