@@ -1,0 +1,71 @@
+# Builds a DEBUG Android APK of the current pages, to install on a real phone and see whether
+# the pages load there at all (docs/decisions/0016-android-app.md, step 1).
+#
+# Not a release: the debug APK is signed with a throwaway debug key and is not published.
+# Start it from the Actions tab (Run workflow), or by pushing to a branch named android/*.
+# The APK comes out as a downloadable "artifact" at the bottom of the finished run's page.
+name: Android
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["android/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  debug-apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Java 17 (Android's Gradle build tool needs it)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install the Android SDK command-line tools
+        uses: android-actions/setup-android@v3
+
+      - name: Install the Android platform, build tools and NDK
+        # The NDK is Google's C/C++ compiler for Android. The engine needs it because its
+        # bundled SQLite is C code. Versions are pinned so a new release can't break a build.
+        run: |
+          sdkmanager --install "platforms;android-34" "build-tools;34.0.0" "ndk;27.2.12479018"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+
+      - name: Install Rust and the Android phone target
+        # aarch64 is the 64-bit ARM chip in practically every phone made in the last decade.
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Reuse compiled dependencies between runs
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+
+      - name: Install the Tauri command-line tool
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli@2
+
+      - name: Generate the Android project
+        # Tauri writes the Gradle/Kotlin project into desktop/gen/android (not committed).
+        working-directory: desktop
+        run: cargo tauri android init --ci
+
+      - name: Build the debug APK
+        working-directory: desktop
+        run: cargo tauri android build --debug --apk --target aarch64
+
+      - name: Keep the APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: dupelens-debug-apk
+          path: desktop/gen/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+          retention-days: 14

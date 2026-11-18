@@ -79,6 +79,10 @@ These are from general knowledge, not checked in this project, and Google change
 
 ## Steps, in order
 1. Add a CI workflow that builds a debug APK of the current pages, and install it on a phone.
+   *In progress:* `desktop/` is now a library plus a thin program (Android loads the library),
+   and `.github/workflows/android.yml` builds the APK. **Not yet run**: the first CI run and the
+   phone test are still to do. On Android the folder picker returns nothing and the database
+   lives in the app's private data folder.
 2. Build the plugin: permission prompt and foreground notification first (easiest to test), then
    trash and untrash, media-ID lookup and the media rescan.
 3. Add the trash-backend interface to the engine, with the desktop Recycle Bin as its first

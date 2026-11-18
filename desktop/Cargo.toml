@@ -7,6 +7,12 @@ license = "MIT OR Apache-2.0"
 publish = false
 default-run = "dupelens"
 
+# The app is a library plus a thin program: Android loads the library (cdylib) and calls into
+# it, while desktop runs the program. The library name must differ from the program's.
+[lib]
+name = "dupelens_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
 [[bin]]
 name = "dupelens"
 path = "src/main.rs"
@@ -21,6 +27,9 @@ anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 serde_json = "1"
 tauri = { version = "2", features = [] }
+
+# The folder dialog is desktop-only; Android has no picker that returns plain paths.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-dialog = "2"
 
 [target.'cfg(windows)'.dependencies]

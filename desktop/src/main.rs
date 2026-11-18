@@ -2,13 +2,9 @@
 //! window; `dupelens <command>` in a terminal runs the CLI commands (`scan`, `groups`,
 //! `clean`, ...) instead, from `dupelens_core::cli`.
 //!
-//! For the window this file is only a host. It maps Tauri's mechanisms onto the shared
-//! [`Service`](dupelens_core::service::Service):
-//! - the `api(cmd, args)` command forwards to `Service::call` (plus the host commands
-//!   `pick_folder` and `quit`);
-//! - the `thumb` URI scheme serves `Service::thumbnail`.
-//!
-//! The page reaches this host only through `ui/js/api.js`. See docs/UI.md.
+//! The window itself (the `api` command, the `thumb` image scheme) lives in `lib.rs`, which
+//! Android also uses. This file is only the desktop start-up: command-line arguments, the
+//! database lock, and Windows console handling. See docs/UI.md.
 
 // Deliberately a console program on Windows (no `windows_subsystem = "windows"`): only then
 // does a terminal wait for `dupelens scan` and show its output, and can `clean` ask for
@@ -16,61 +12,9 @@
 
 use clap::Parser;
 use dupelens_core::cli;
-use dupelens_core::service::{ApiError, Service};
-use dupelens_core::Engine;
-use serde_json::{json, Value};
+use dupelens_desktop_lib::open_window;
 use std::io::Write;
 use std::path::PathBuf;
-use tauri::{http, Manager, State};
-use tauri_plugin_dialog::DialogExt;
-
-/// `async` so it runs off the main thread: scans, comparisons and the folder dialog must
-/// not freeze the window.
-#[tauri::command(async)]
-fn api(
-    app: tauri::AppHandle,
-    service: State<'_, Service>,
-    cmd: String,
-    args: Value,
-) -> Result<Value, ApiError> {
-    match cmd.as_str() {
-        "pick_folder" => {
-            let picked = app
-                .dialog()
-                .file()
-                .set_title("Choose a folder to scan")
-                .blocking_pick_folder()
-                .and_then(|p| p.into_path().ok());
-            Ok(json!(picked.map(|p| p.to_string_lossy().into_owned())))
-        }
-        // The user's standard folders that exist, offered as one-click choices on first run.
-        // Only these well-known locations are listed; nothing is read from them.
-        "suggested_folders" => {
-            let paths = app.path();
-            let candidates = [
-                ("Pictures", paths.picture_dir()),
-                ("Downloads", paths.download_dir()),
-                ("Desktop", paths.desktop_dir()),
-                ("Documents", paths.document_dir()),
-                ("Videos", paths.video_dir()),
-                ("Music", paths.audio_dir()),
-            ];
-            let found: Vec<Value> = candidates
-                .into_iter()
-                .filter_map(|(name, dir)| {
-                    let dir = dir.ok().filter(|d| d.is_dir())?;
-                    Some(json!({ "name": name, "path": dir.to_string_lossy() }))
-                })
-                .collect();
-            Ok(json!(found))
-        }
-        "quit" => {
-            app.exit(0);
-            Ok(Value::Null)
-        }
-        _ => service.call(&cmd, args),
-    }
-}
 
 #[derive(Parser)]
 #[command(
@@ -161,35 +105,3 @@ fn hide_own_console() {
 
 #[cfg(not(windows))]
 fn hide_own_console() {}
-
-fn open_window(engine: Engine) -> anyhow::Result<()> {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
-        .manage(Service::new(engine))
-        .invoke_handler(tauri::generate_handler![api])
-        .register_asynchronous_uri_scheme_protocol("thumb", |ctx, request, responder| {
-            let service = ctx.app_handle().state::<Service>().inner().clone();
-            // Decoding a photo takes a while; keep it off the webview's thread.
-            std::thread::spawn(move || {
-                let uri = request.uri();
-                let id = uri.path().trim_start_matches('/').parse::<i64>().ok();
-                let large = uri.query().is_some_and(|q| q.contains("size=large"));
-                let response = match id.and_then(|id| service.thumbnail(id, large).ok()) {
-                    Some(jpeg) => http::Response::builder()
-                        .header("Content-Type", "image/jpeg")
-                        .header("Cache-Control", "private, max-age=600")
-                        .body(jpeg.to_vec()),
-                    None => http::Response::builder().status(404).body(Vec::new()),
-                };
-                // The builder only fails on invalid headers, which these aren't; if it ever
-                // does, answer with a bare 500 rather than panicking the worker thread.
-                responder.respond(response.unwrap_or_else(|_| {
-                    let mut failed = http::Response::new(Vec::new());
-                    *failed.status_mut() = http::StatusCode::INTERNAL_SERVER_ERROR;
-                    failed
-                }));
-            });
-        })
-        .run(tauri::generate_context!())
-        .map_err(|e| anyhow::anyhow!("the DupeLens window failed: {e}"))
-}
