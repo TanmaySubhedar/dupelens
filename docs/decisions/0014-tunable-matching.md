@@ -14,9 +14,14 @@ scan could not be stopped.
    | Preset | Overall look (pHash bits) | Fine detail (dHash bits) | Shape tolerance | Pixel change |
    |---|---|---|---|---|
    | Exact only | – (look-alikes off) | – | – | – |
-   | Strict | 4 | 6 | 3% | 10 |
-   | **Balanced** (default, today's behaviour) | 8 | 12 | 5% | 18 |
-   | Loose | 12 | 18 | 8% | 30 |
+   | Strict | 5 | 8 | 3% | 12 |
+   | **Balanced** (default) | 10 | 16 | 6% | 24 |
+   | Loose | 14 | 22 | 10% | 32 |
+
+   *Revised after v0.2.0:* the first values (Strict 4/6/3%/10, Balanced 8/12/5%/18,
+   Loose 12/18/8%/30) were too tight in use: real look-alikes were rarely shown. Balanced is now
+   looser on all four tests; Strict and Loose moved with it. The pixel-change limit stays well
+   under the ~35 that two screenshots with different text score, so those still stay apart.
 
    A fifth, **Custom**, holds the four raw values, checked against limits (24, 32, 25%, 60).
 2. **Changing the setting never needs a rescan.** Fingerprints and pixel-comparison scores are

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Video preview.** Videos now show their first frame in the results list and play in the
+  preview pane and the full-size view (seekable, streamed from disk in small slices). Formats the
+  system's web view cannot play, such as some MKV and AVI files, still show the file-type
+  placeholder.
+- **Look-alikes were too rare.** The Balanced preset is looser on all four tests (overall look
+  10, fine detail 16, shape 6%, pixel change 24), and Strict and Loose moved with it. Different
+  screenshots of the same window are still kept apart.
+
 ## 0.2.0
 
 ### New

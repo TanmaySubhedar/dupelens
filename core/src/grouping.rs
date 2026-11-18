@@ -34,10 +34,10 @@ impl Default for GroupingConfig {
     fn default() -> Self {
         Self {
             look_alikes: true,
-            phash_max: 8,
-            dhash_max: 12,
-            aspect_tolerance: 0.05,
-            max_local_difference: 18.0,
+            phash_max: 10,
+            dhash_max: 16,
+            aspect_tolerance: 0.06,
+            max_local_difference: 24.0,
         }
     }
 }
@@ -373,41 +373,41 @@ mod tests {
 
     #[test]
     fn a_group_needing_a_looser_overall_look_is_tentative() {
-        let ten_bits = 0b11_1111_1111; // Balanced allows 8, Loose 12
+        let twelve_bits = 0b1111_1111_1111; // Balanced allows 10, Loose 14
         assert!(tentative_under_loose(
             rec(1, "a", 0, 0, 100, 100),
-            rec(2, "b", ten_bits, 0, 100, 100),
+            rec(2, "b", twelve_bits, 0, 100, 100),
             0.0
         ));
     }
 
     #[test]
     fn a_group_needing_a_looser_fine_detail_is_tentative() {
-        let fourteen_bits = 0b11_1111_1111_1111; // dHash: Balanced allows 12, Loose 18
+        let eighteen_bits = 0b11_1111_1111_1111_1111; // dHash: Balanced allows 16, Loose 22
         assert!(tentative_under_loose(
             rec(1, "a", 0, 0, 100, 100),
-            rec(2, "b", 0, fourteen_bits, 100, 100),
+            rec(2, "b", 0, eighteen_bits, 100, 100),
             0.0
         ));
     }
 
     #[test]
     fn a_group_needing_a_looser_shape_is_tentative() {
-        // Aspect ratios 6% apart: Balanced allows 5%, Loose 8%.
+        // Aspect ratios 8% apart: Balanced allows 6%, Loose 10%.
         assert!(tentative_under_loose(
             rec(1, "a", 0, 0, 1000, 1000),
-            rec(2, "b", 0, 0, 940, 1000),
+            rec(2, "b", 0, 0, 920, 1000),
             0.0
         ));
     }
 
     #[test]
     fn a_group_needing_a_looser_pixel_check_is_tentative() {
-        // Every hash agrees exactly, but the pixels differ by 25: Balanced allows 18, Loose 30.
+        // Every hash agrees exactly, but the pixels differ by 28: Balanced allows 24, Loose 32.
         assert!(tentative_under_loose(
             rec(1, "a", 0, 0, 100, 100),
             rec(2, "b", 0, 0, 100, 100),
-            25.0
+            28.0
         ));
     }
 

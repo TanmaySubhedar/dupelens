@@ -758,6 +758,21 @@ impl Service {
         })
     }
 
+    /// The path of a video in the current results, so the host can stream it to the player.
+    ///
+    /// Like `thumbnail`, only ids from the current results resolve, and only video files:
+    /// the page can never ask the host to read an arbitrary path or a non-video file.
+    pub fn video_path(&self, id: i64) -> Result<PathBuf, ApiError> {
+        let path = lock(&self.inner.results)
+            .as_ref()
+            .and_then(|r| r.paths.get(&id).cloned())
+            .ok_or_else(|| ApiError::new(ErrorKind::NotFound, "no such file in the results"))?;
+        if Category::from_path(&path) != Category::Video {
+            return Err(ApiError::new(ErrorKind::NotFound, "not a video"));
+        }
+        Ok(path)
+    }
+
     /// A JPEG preview of a file in the current results. `large` picks the enlarged-view size.
     ///
     /// Errors with `NotFound` for ids outside the current results and for files that cannot

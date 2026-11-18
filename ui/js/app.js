@@ -3,7 +3,7 @@
 // No browser popups (alert/confirm/prompt): some Tauri webviews don't support them, so
 // dialogs are drawn in the page. Design: docs/UI.md ("Visual design").
 
-import { ApiError, call, pickFolder, thumbUrl } from './api.js';
+import { ApiError, call, pickFolder, thumbUrl, videoUrl } from './api.js';
 import { h, mount } from './dom.js';
 import { byCategory, categoryName, dimensions, formatBytes, nextMilestone, plural } from './format.js';
 import { Selection } from './selection.js';
@@ -56,11 +56,19 @@ async function busy(button, action) {
 }
 
 function preview(file, { large = false, cls = 'thumb' } = {}) {
-  const img = h('img', { class: cls, src: thumbUrl(file.id, large), alt: file.name, loading: 'lazy', decoding: 'async' });
-  img.addEventListener('error', () => {
-    img.replaceWith(h('div', { class: `${cls} no-preview`, title: 'No preview for this format' }, file.name.split('.').pop()?.toUpperCase() ?? '?'));
+  // Videos play in a <video>. Small spots (tiles, review rows) show the first frame only;
+  // the enlarged spots get player controls. The `#t=0.1` makes the browser draw a frame
+  // instead of a black box.
+  const el = file.category === 'video'
+    ? h('video', {
+      class: cls, src: `${videoUrl(file.id)}#t=0.1`, preload: 'metadata', muted: true, playsinline: true,
+      controls: large, title: file.name,
+    })
+    : h('img', { class: cls, src: thumbUrl(file.id, large), alt: file.name, loading: 'lazy', decoding: 'async' });
+  el.addEventListener('error', () => {
+    el.replaceWith(h('div', { class: `${cls} no-preview`, title: 'No preview for this format' }, file.name.split('.').pop()?.toUpperCase() ?? '?'));
   }, { once: true });
-  return img;
+  return el;
 }
 
 /** An in-page modal. Resolves when closed; Escape and the backdrop close it. */

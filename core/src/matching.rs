@@ -81,18 +81,18 @@ impl Preset {
                 ..balanced
             },
             Preset::Strict => GroupingConfig {
-                phash_max: 4,
-                dhash_max: 6,
+                phash_max: 5,
+                dhash_max: 8,
                 aspect_tolerance: 0.03,
-                max_local_difference: 10.0,
+                max_local_difference: 12.0,
                 ..balanced
             },
             Preset::Balanced | Preset::Custom => balanced,
             Preset::Loose => GroupingConfig {
-                phash_max: 12,
-                dhash_max: 18,
-                aspect_tolerance: 0.08,
-                max_local_difference: 30.0,
+                phash_max: 14,
+                dhash_max: 22,
+                aspect_tolerance: 0.10,
+                max_local_difference: 32.0,
                 ..balanced
             },
         }
