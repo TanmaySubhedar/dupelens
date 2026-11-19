@@ -29,6 +29,11 @@ export function thumbUrl(id, large = false) {
   return `${tauri.convertFileSrc(String(id), 'thumb')}?${size}`;
 }
 
+/** Address a video can be played from (served by the host's `video` scheme, with seeking). */
+export function videoUrl(id) {
+  return tauri.convertFileSrc(String(id), 'video');
+}
+
 /** Opens the system folder dialog. Resolves to a path, or null if cancelled/unavailable. */
 export function pickFolder() {
   return call('pick_folder');

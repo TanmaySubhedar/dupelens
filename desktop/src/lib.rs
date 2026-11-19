@@ -220,6 +220,132 @@ fn builder() -> tauri::Builder<tauri::Wry> {
                 }));
             });
         })
+        .register_asynchronous_uri_scheme_protocol("video", |ctx, request, responder| {
+            let service = ctx.app_handle().state::<Service>().inner().clone();
+            std::thread::spawn(move || {
+                let id = request
+                    .uri()
+                    .path()
+                    .trim_start_matches('/')
+                    .parse::<i64>()
+                    .ok();
+                let range = request
+                    .headers()
+                    .get("range")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned);
+                let response = id
+                    .and_then(|id| service.video_path(id).ok())
+                    .and_then(|path| video_response(&path, range.as_deref()))
+                    .unwrap_or_else(|| {
+                        let mut r = http::Response::new(Vec::new());
+                        *r.status_mut() = http::StatusCode::NOT_FOUND;
+                        r
+                    });
+                responder.respond(response);
+            });
+        })
+}
+
+/// Largest slice of a video sent per request. The player asks for more as it plays, and asks
+/// again at the new spot when the user seeks, so a big file is never read into memory whole.
+const VIDEO_CHUNK: u64 = 4 * 1024 * 1024;
+
+fn video_mime(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("webm") => "video/webm",
+        Some("mov") => "video/quicktime",
+        Some("mkv") => "video/x-matroska",
+        Some("avi") => "video/x-msvideo",
+        _ => "video/mp4",
+    }
+}
+
+/// Reads `bytes=start-end` (either end optional) into an inclusive byte range within `len`.
+fn parse_range(header: &str, len: u64) -> Option<(u64, u64)> {
+    let spec = header.strip_prefix("bytes=")?.split(',').next()?.trim();
+    let (a, b) = spec.split_once('-')?;
+    let last = len.checked_sub(1)?;
+    let (start, end) = if a.is_empty() {
+        // "-N": the last N bytes.
+        let n: u64 = b.parse().ok()?;
+        (len.saturating_sub(n), last)
+    } else {
+        let start: u64 = a.parse().ok()?;
+        let end = if b.is_empty() {
+            last
+        } else {
+            b.parse::<u64>().ok()?.min(last)
+        };
+        (start, end)
+    };
+    (start <= end).then_some((start, end))
+}
+
+/// A (partial) response for a video file. Without a Range header the player gets the first
+/// chunk as a 206 telling it the full size, which is enough for it to start and then seek.
+fn video_response(path: &std::path::Path, range: Option<&str>) -> Option<http::Response<Vec<u8>>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len == 0 {
+        return None;
+    }
+    let (start, end) = range
+        .and_then(|r| parse_range(r, len))
+        .unwrap_or((0, len - 1));
+    if start >= len {
+        return http::Response::builder()
+            .status(416)
+            .header("Content-Range", format!("bytes */{len}"))
+            .body(Vec::new())
+            .ok();
+    }
+    let end = end.min(start + VIDEO_CHUNK - 1);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut body = vec![0u8; (end - start + 1) as usize];
+    file.read_exact(&mut body).ok()?;
+    http::Response::builder()
+        .status(206)
+        .header("Content-Type", video_mime(path))
+        .header("Accept-Ranges", "bytes")
+        .header("Content-Range", format!("bytes {start}-{end}/{len}"))
+        .body(body)
+        .ok()
+}
+
+#[cfg(test)]
+mod video_tests {
+    use super::*;
+
+    #[test]
+    fn ranges_parse() {
+        assert_eq!(parse_range("bytes=0-99", 1000), Some((0, 99)));
+        assert_eq!(parse_range("bytes=500-", 1000), Some((500, 999)));
+        assert_eq!(parse_range("bytes=-100", 1000), Some((900, 999)));
+        assert_eq!(parse_range("bytes=900-5000", 1000), Some((900, 999)));
+        assert_eq!(parse_range("bytes=9-3", 1000), None);
+        assert_eq!(parse_range("items=0-1", 1000), None);
+    }
+
+    #[test]
+    fn video_response_serves_a_slice_with_its_position() {
+        let dir = std::env::temp_dir().join(format!("dupelens-video-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clip.mp4");
+        std::fs::write(&path, (0..=255u8).cycle().take(1000).collect::<Vec<_>>()).unwrap();
+        let r = video_response(&path, Some("bytes=10-19")).unwrap();
+        assert_eq!(r.status(), 206);
+        assert_eq!(r.headers()["Content-Range"], "bytes 10-19/1000");
+        assert_eq!(r.body(), &(10..20u8).collect::<Vec<_>>());
+        assert_eq!(video_response(&path, None).unwrap().body().len(), 1000);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
 
 /// Desktop: opens the window on an engine that `main.rs` already opened.

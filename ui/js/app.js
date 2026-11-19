@@ -3,7 +3,7 @@
 // No browser popups (alert/confirm/prompt): some Tauri webviews don't support them, so
 // dialogs are drawn in the page. Design: docs/UI.md ("Visual design").
 
-import { ApiError, call, openStorageSettings, pickFolder, storageStatus, thumbUrl } from './api.js';
+import { ApiError, call, openStorageSettings, pickFolder, storageStatus, thumbUrl, videoUrl } from './api.js';
 import { h, mount } from './dom.js';
 import { byCategory, categoryName, dimensions, formatBytes, nextMilestone, plural } from './format.js';
 import { Selection } from './selection.js';
@@ -58,12 +58,43 @@ async function busy(button, action) {
   }
 }
 
+/**
+ * Small video thumbnails get their source only when scrolled near the screen. Unlike an
+ * <img loading="lazy">, a <video> has no built-in way to wait, and a long list would
+ * otherwise start loading every clip at once.
+ */
+const lazyVideos = typeof IntersectionObserver === 'function'
+  ? new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      lazyVideos.unobserve(entry.target);
+      entry.target.src = entry.target.dataset.src;
+    }
+  }, { rootMargin: '300px' })
+  : null;
+
 function preview(file, { large = false, cls = 'thumb' } = {}) {
-  const img = h('img', { class: cls, src: thumbUrl(file.id, large), alt: file.name, loading: 'lazy', decoding: 'async' });
-  img.addEventListener('error', () => {
-    img.replaceWith(h('div', { class: `${cls} no-preview`, title: 'No preview for this format' }, file.name.split('.').pop()?.toUpperCase() ?? '?'));
+  // Videos play in a <video>. Small spots (tiles, review rows) show the first frame only;
+  // the enlarged spots get player controls. The `#t=0.1` makes the browser draw a frame
+  // instead of a black box.
+  const isVideo = file.category === 'video';
+  const el = isVideo
+    ? h('video', { class: cls, preload: 'metadata', muted: true, playsinline: true, controls: large, title: file.name })
+    : h('img', { class: cls, src: thumbUrl(file.id, large), alt: file.name, loading: 'lazy', decoding: 'async' });
+  if (isVideo) {
+    const src = `${videoUrl(file.id)}#t=0.1`;
+    if (large || !lazyVideos) {
+      el.src = src;
+    } else {
+      el.dataset.src = src;
+      lazyVideos.observe(el);
+    }
+  }
+  el.addEventListener('error', () => {
+    if (isVideo) lazyVideos?.unobserve(el);
+    el.replaceWith(h('div', { class: `${cls} no-preview`, title: 'No preview for this format' }, file.name.split('.').pop()?.toUpperCase() ?? '?'));
   }, { once: true });
-  return img;
+  return el;
 }
 
 /**
@@ -704,7 +735,8 @@ function onKeys(e) {
   if (state.screen !== 'results' || e.ctrlKey || e.metaKey || e.altKey) return;
   if (document.querySelector('.backdrop')) return;
   const t = e.target;
-  if (t instanceof HTMLElement && t.matches('input, select, textarea')) return;
+  // A focused video player keeps its own keys (Space plays/pauses, arrows seek).
+  if (t instanceof HTMLElement && t.matches('input, select, textarea, video')) return;
   const flat = shownGroups().flatMap((g) => g.members.map((m) => ({ group: g, file: m })));
   const at = flat.findIndex((x) => x.group.id === state.active?.gid && x.file.id === state.active?.fid);
   const found = findActive();
@@ -742,7 +774,7 @@ function spaceBelongsToButton(t) {
 document.addEventListener('keydown', onKeys);
 // A button also activates on Space's key-up; stop that so Space only opens the viewer.
 document.addEventListener('keyup', (e) => {
-  if (e.key === ' ' && state.screen === 'results' && !(e.target instanceof HTMLElement && e.target.matches('input, select, textarea')) && !spaceBelongsToButton(e.target)) e.preventDefault();
+  if (e.key === ' ' && state.screen === 'results' && !(e.target instanceof HTMLElement && e.target.matches('input, select, textarea, video')) && !spaceBelongsToButton(e.target)) e.preventDefault();
 });
 
 // ---------- screen: review ----------
