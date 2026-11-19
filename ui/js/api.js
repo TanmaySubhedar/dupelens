@@ -39,6 +39,21 @@ export function pickFolder() {
   return call('pick_folder');
 }
 
+/** Android only: lists the sub-folders of `path` (or of shared storage when null). */
+export function browseFolder(path = null) {
+  return call('browse_folder', { path });
+}
+
+/** Android only: `{ supported, granted }` for access to the phone's files. */
+export function storageStatus() {
+  return call('storage_status');
+}
+
+/** Android only: opens the settings page where the person allows access to all files. */
+export function openStorageSettings() {
+  return call('open_storage_settings');
+}
+
 /** Stops the app by closing its window. */
 export function quit() {
   return call('quit');

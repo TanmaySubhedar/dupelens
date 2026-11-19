@@ -27,6 +27,8 @@ anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 serde_json = "1"
 tauri = { version = "2", features = [] }
+# Android-only system calls (storage permission, screen insets); answers "not supported" elsewhere.
+tauri-plugin-dupelens-device = { path = "../plugins/device" }
 
 # The folder dialog is desktop-only; Android has no picker that returns plain paths.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]

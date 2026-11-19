@@ -70,3 +70,26 @@ test('a tentative group starts with nothing marked, and Keep recommended leaves 
   s.keepRecommended();
   assert.equal(s.markedIn(maybe).size, 0);
 });
+
+test('a phone-style selection starts empty, and "select duplicates" applies the default', () => {
+  const a = group(1, 1, 1, 2, 3);
+  const b = group(4, 4, 4, 5);
+  const s = new Selection();
+  s.emptyStart = true;
+  s.load([a, b]);
+  assert.equal(s.markedFiles().length, 0, 'nothing is selected until asked');
+  s.keepRecommended();
+  assert.deepEqual(s.markedFiles().map(({ file: f }) => f.id), [2, 3, 5], 'all but the best copy of each group');
+  s.clear();
+  assert.equal(s.markedFiles().length, 0);
+});
+
+test('a phone-style selection keeps its picks across a partial delete', () => {
+  const g = group(1, 1, 1, 2, 3);
+  const s = new Selection();
+  s.emptyStart = true;
+  s.load([g]);
+  s.toggle(g, 2);
+  s.load([g], { keepPrevious: true });
+  assert.deepEqual([...s.markedIn(g)], [2]);
+});

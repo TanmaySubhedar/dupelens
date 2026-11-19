@@ -6,3 +6,9 @@
 # Tauri desktop host
 /desktop/target/
 /desktop/gen/
+
+# Android device plugin: built as part of desktop/, never on its own
+/plugins/device/target/
+/plugins/device/Cargo.lock
+/plugins/device/android/.tauri/
+/plugins/device/android/build/
