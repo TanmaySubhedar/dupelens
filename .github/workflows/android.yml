@@ -8,6 +8,11 @@ name: Android
 
 on:
   workflow_dispatch:
+    inputs:
+      release:
+        description: "Build in release mode (unsigned) to test the build the Release workflow does"
+        type: boolean
+        default: false
   push:
     branches: ["android/**"]
 
@@ -38,7 +43,7 @@ jobs:
         # The NDK is Google's C/C++ compiler for Android. The engine needs it because its
         # bundled SQLite is C code. The platform, build tools and NDK versions are pinned; the Rust toolchain follows "stable".
         run: |
-          sdkmanager --install "platforms;android-34" "build-tools;34.0.0" "ndk;27.2.12479018"
+          sdkmanager --install "platforms;android-34" "platforms;android-36" "build-tools;34.0.0" "ndk;27.2.12479018"
           echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
 
       - name: Install Rust and the Android phone target
@@ -71,9 +76,14 @@ jobs:
           cp -r desktop/icons/android/. "$res"/
           ls "$res"/mipmap-xxxhdpi
 
-      - name: Build the debug APK
+      - name: Build the APK (debug, or release when asked for)
         working-directory: desktop
-        run: cargo tauri android build --debug --apk --target aarch64
+        run: |
+          if [ "${{ inputs.release }}" = "true" ]; then
+            cargo tauri android build --apk --target aarch64
+          else
+            cargo tauri android build --debug --apk --target aarch64
+          fi
 
       - name: Keep the APK
         uses: actions/upload-artifact@v4

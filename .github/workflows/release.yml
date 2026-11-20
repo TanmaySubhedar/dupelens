@@ -100,7 +100,7 @@ jobs:
 
       - name: Install the Android platform, build tools and NDK
         run: |
-          sdkmanager --install "platforms;android-34" "build-tools;34.0.0" "ndk;27.2.12479018"
+          sdkmanager --install "platforms;android-34" "platforms;android-36" "build-tools;34.0.0" "ndk;27.2.12479018"
           echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
 
       - name: Install Rust and the Android phone target
