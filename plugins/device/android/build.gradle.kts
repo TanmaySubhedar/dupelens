@@ -5,9 +5,10 @@ plugins {
 
 android {
     namespace = "org.dupelens.device"
-    // Compiled against an older platform than the app: nothing here needs a newer one, and
-    // the CI runner has this one installed.
-    compileSdk = 34
+    // Must be at least what the Tauri Android library (":tauri-android") is built for: a release
+    // build stops at "checkReleaseAarMetadata" if this is lower (36 at the time of writing).
+    // A debug build does not check it, which is how this went unnoticed.
+    compileSdk = 36
 
     defaultConfig {
         minSdk = 24
