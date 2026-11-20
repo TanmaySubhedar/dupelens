@@ -1,6 +1,7 @@
 # DupeLens
 
-A privacy-first, offline duplicate photo finder for your desktop, in the spirit of the
+A privacy-first, offline duplicate photo finder for your desktop (Windows, Linux) and, as an
+early version, your Android phone, in the spirit of the
 duplicate cleaner in Files by Google: it recommends the best copy to keep, pre-selects the
 rest, and cleans up when you confirm. Nothing is ever uploaded.
 
