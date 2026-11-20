@@ -62,6 +62,15 @@ jobs:
         working-directory: desktop
         run: cargo tauri android init --ci
 
+      - name: Use the DupeLens launcher icon
+        # "android init" fills the project with Tauri's stock icon. Overwrite it with ours
+        # (made by scripts/make_android_icons.py and kept in desktop/icons/android).
+        run: |
+          res=desktop/gen/android/app/src/main/res
+          test -d "$res" || { echo "no $res"; exit 1; }
+          cp -r desktop/icons/android/. "$res"/
+          ls "$res"/mipmap-xxxhdpi
+
       - name: Build the debug APK
         working-directory: desktop
         run: cargo tauri android build --debug --apk --target aarch64
