@@ -102,12 +102,12 @@ $B clean                # keeps the recommended copy, moves the rest to the Recy
 1. **Exact duplicates**: files with the same SHA-256 (byte-for-byte identical).
 2. **Near duplicates**: perceptual hashes are 64-bit fingerprints of what a picture looks
    like. A resized, recompressed or re-formatted copy gets almost the same fingerprint. Two
-   photos match if their pHash differs by ≤ 8 of 64 bits.
-3. **Verification**: a pHash match must also agree on dHash (≤ 12 bits) and aspect ratio
-   (within 5%), and then pass a **pixel check**. Hashes only see the broad layout, so two
+   photos match if their pHash differs by ≤ 10 of 64 bits (Balanced preset).
+3. **Verification**: a pHash match must also agree on dHash (≤ 16 bits) and aspect ratio
+   (within 6%), and then pass a **pixel check**. Hashes only see the broad layout, so two
    screenshots of the same window with different text look identical to them. The pixel
    check shrinks both images to a common size (the smaller image's own size, at most 512), splits
-   them into 8×8 patches and rejects the match if any patch differs strongly (score > 18). On a
+   them into 8×8 patches and rejects the match if any patch differs strongly (score > 24). On a
    test library built from real screenshots, genuine copies (re-saved, WebP, WhatsApp-style,
    half and quarter size) scored ≤ 7.7, and different screenshots scored ≥ 34. Scores are
    cached in the database, so each pair is compared only once.

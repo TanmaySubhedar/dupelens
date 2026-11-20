@@ -23,7 +23,7 @@ pub struct GroupingConfig {
     pub phash_max: u32,
     /// Max dHash distance, checked as a second opinion to cut false positives.
     pub dhash_max: u32,
-    /// Max relative difference in aspect ratio (0.05 = 5%).
+    /// Max relative difference in aspect ratio (0.06 = 6%).
     pub aspect_tolerance: f64,
     /// Max [`crate::hashing::local_difference`] score. Re-encoded or resized copies of one
     /// picture score under ~10; pictures with real changes, even small ones, score over ~35.

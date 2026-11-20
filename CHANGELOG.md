@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 (2026-11-20)
+
+### New
+- **Android test build (not part of this release's downloads).** The repository can now build
+  an Android app (a debug APK, started by hand from the Actions tab) with a phone layout: a
+  gallery of each group's copies, tap to select, full-screen preview with pinch zoom and swipe,
+  an in-app folder browser and an "Allow access to all files" screen. It is for testing on a
+  real phone. **Android has no Recycle Bin here yet, so Delete removes files for good; the app
+  says so before it deletes.**
+  [Decision 0016](docs/decisions/0016-android-app.md)
 
 ### Fixed
 - **Video preview.** Videos now show their first frame in the results list and play in the
