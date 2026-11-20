@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 (2026-11-20)
+
+### New
+- **Android app (early version).** The release now includes an APK for 64-bit ARM phones, built
+  with the same engine and pages as the desktop app, with a phone layout: a gallery of each
+  group's copies, tap to select, full-screen preview with pinch zoom and swipe, an in-app folder
+  browser and an "Allow access to all files" screen, and the DupeLens icon. **Android has no
+  Recycle Bin here yet, so Delete removes files for good; the app says so before it deletes.**
+  [Decision 0016](docs/decisions/0016-android-app.md)
+- **One release, every download.** The release workflow now builds the Windows and Linux
+  installers and the Android APK together and attaches them to the same draft release.
 
 ### Fixed
 - **Video preview.** Videos now show their first frame in the results list and play in the

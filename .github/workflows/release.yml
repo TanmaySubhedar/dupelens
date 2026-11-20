@@ -1,5 +1,6 @@
-# Builds the DupeLens desktop installers for Windows and Linux and attaches them to a draft
-# GitHub Release. Start it by pushing a version tag:  git tag v0.1.0 && git push --tags
+# Builds the DupeLens desktop installers for Windows and Linux, and the Android APK, and
+# attaches them all to one draft GitHub Release. Start it by pushing a version tag:
+#   git tag v0.1.0 && git push --tags
 # (macOS is left out for now; it needs an Apple developer account to install without warnings.)
 name: Release
 
@@ -62,6 +63,118 @@ jobs:
           tauriScript: cargo tauri
           tagName: ${{ github.ref_name }}
           releaseName: "DupeLens ${{ github.ref_name }}"
-          releaseBody: "Download the installer for your system below. Windows: the .exe (setup) or .msi. Linux: .deb, .rpm or .AppImage. The app is not code-signed yet, so Windows may show a SmartScreen warning: choose More info, then Run anyway."
+          releaseBody: "Download the installer for your system below. Windows: the .exe (setup) or .msi. Linux: .deb, .rpm or .AppImage. Android: the .apk (64-bit ARM phones). The app is not code-signed yet, so Windows may show a SmartScreen warning: choose More info, then Run anyway."
           releaseDraft: true
           prerelease: false
+
+  android:
+    # Builds the Android app (64-bit ARM phones) and adds the APK to the same draft release.
+    # Runs after "build" so the draft release already exists.
+    #
+    # Signing: Android only installs signed apps, and an update only installs over an older
+    # copy if it is signed with the SAME key. So a real release needs one permanent key, kept
+    # in these repository secrets (Settings > Secrets and variables > Actions):
+    #   ANDROID_KEYSTORE_BASE64    the key file, encoded as base64
+    #   ANDROID_KEYSTORE_PASSWORD  its password (the key uses the same one)
+    #   ANDROID_KEY_ALIAS          the key's name inside the file
+    # Without them the job still runs, but builds a debug-signed APK named "...-debug.apk"
+    # (fine to try out; it cannot be updated in place by a later release).
+    needs: [check-version, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      HAVE_KEY: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Java 17 (Android's Gradle build tool needs it)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install the Android SDK command-line tools
+        uses: android-actions/setup-android@v3
+        with:
+          packages: ""
+
+      - name: Install the Android platform, build tools and NDK
+        run: |
+          sdkmanager --install "platforms;android-34" "build-tools;34.0.0" "ndk;27.2.12479018"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+
+      - name: Install Rust and the Android phone target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Reuse compiled dependencies between runs
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+
+      - name: Install the Tauri command-line tool (pinned to the version of the tauri crate in Cargo.lock)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli@2.12.1
+
+      - name: Generate the Android project
+        working-directory: desktop
+        run: cargo tauri android init --ci
+
+      - name: Use the DupeLens launcher icon
+        run: |
+          res=desktop/gen/android/app/src/main/res
+          test -d "$res" || { echo "no $res"; exit 1; }
+          cp -r desktop/icons/android/. "$res"/
+
+      - name: Build the APK
+        working-directory: desktop
+        run: |
+          if [ "$HAVE_KEY" = "true" ]; then
+            cargo tauri android build --apk --target aarch64
+          else
+            echo "::warning::No signing key in the repository secrets: building a debug-signed APK."
+            cargo tauri android build --debug --apk --target aarch64
+          fi
+
+      - name: Name and sign the APK
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          version=$(jq -r .version desktop/tauri.conf.json)
+          out="$RUNNER_TEMP/apk"
+          mkdir -p "$out"
+          apk=$(find desktop/gen/android/app/build/outputs/apk -name '*.apk' | head -n 1)
+          test -n "$apk" || { echo "no APK was built"; exit 1; }
+          if [ "$HAVE_KEY" = "true" ]; then
+            tools="$ANDROID_HOME/build-tools/34.0.0"
+            printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            "$tools/zipalign" -f 4 "$apk" "$RUNNER_TEMP/aligned.apk"
+            "$tools/apksigner" sign --ks "$RUNNER_TEMP/release.keystore" --ks-key-alias "$KEY_ALIAS" \
+              --ks-pass env:KEYSTORE_PASSWORD --out "$out/DupeLens_${version}_android-arm64.apk" \
+              "$RUNNER_TEMP/aligned.apk"
+            "$tools/apksigner" verify "$out/DupeLens_${version}_android-arm64.apk"
+            rm -f "$RUNNER_TEMP/release.keystore"
+          else
+            cp "$apk" "$out/DupeLens_${version}_android-arm64-debug.apk"
+          fi
+          ls -l "$out"
+
+      - name: Keep the APK as a download on this run
+        uses: actions/upload-artifact@v4
+        with:
+          name: dupelens-android-apk
+          path: ${{ runner.temp }}/apk/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Add the APK to the draft release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          files: ${{ runner.temp }}/apk/*.apk
